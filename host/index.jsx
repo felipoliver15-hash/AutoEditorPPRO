@@ -4473,6 +4473,31 @@ function clearSequenceMarkers(seq) {
     return removed;
 }
 
+// Lê os marcadores de SEQUÊNCIA da timeline ativa e devolve {time, title}
+// ordenado por tempo. Usado pelo botão "Atualizar Capítulos" pra refletir
+// marcadores que o usuário moveu de lugar depois da montagem.
+function getChaptersFromMarkers() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
+        var chaps = [];
+        var m = seq.markers.getFirstMarker();
+        while (m) {
+            var t = 0;
+            try { t = parseFloat(m.start.ticks) / TICKS_PER_SECOND; } catch (eT) {}
+            var title = "";
+            try { title = m.name || ""; } catch (eN) {}
+            if (!title) { try { title = m.comments || ""; } catch (eC) {} }
+            chaps.push({ time: t, title: title });
+            var next = null;
+            try { next = seq.markers.getNextMarker(m); } catch (eNx) {}
+            m = next;
+        }
+        chaps.sort(function (a, b) { return a.time - b.time; });
+        return JSON.stringify({ ok: true, chapters: chaps });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
+}
+
 // Duração do CONTEÚDO interno do template (maxClipEnd) — usado como limite máximo
 // de esticamento do PRECO (a "reserva" que o usuário criou estendendo a sequência).
 // Diferente de templateSourceDuration (que mede o range In/Out = o que é inserido).
@@ -4696,6 +4721,146 @@ function getProjectDir() {
         var i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
         return JSON.stringify({ dir: (i >= 0 ? p.substring(0, i) : "") });
     } catch (e) { return JSON.stringify({ dir: "" }); }
+}
+
+// ─── ABA RECURSOS (setup: bins de produto + sequências de template) ──────────
+
+// Próximo número de produto disponível: varre os bins PROD_<n> no root e
+// retorna o maior + 1 (1 se nenhum existir).
+function getNextProductNumber() {
+    try {
+        var root = app.project.rootItem;
+        var max = 0;
+        for (var i = 0; i < root.children.numItems; i++) {
+            var nm = String(root.children[i].name || "");
+            var m = nm.match(/^PROD_(\d+)$/i);
+            if (m) { var v = parseInt(m[1], 10); if (v > max) max = v; }
+        }
+        return JSON.stringify({ next: max + 1 });
+    } catch (e) { return JSON.stringify({ next: 1, error: e.message }); }
+}
+
+// Diálogo nativo de seleção de arquivos (vídeos + imagens), multi-seleção.
+function selectMediaFiles() {
+    try {
+        var filter;
+        if ($.os.indexOf("Windows") >= 0) {
+            filter = "Vídeos e imagens:*.mp4;*.mov;*.webm;*.mkv;*.avi;*.m4v;*.mpg;*.mpeg;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.webp,Todos os arquivos:*.*";
+        } else {
+            filter = function (f) { return true; };
+        }
+        var sel = File.openDialog("Selecione vídeos e imagens do produto", filter, true);
+        if (!sel) return JSON.stringify({ cancelled: true });
+        var arr = (sel instanceof Array) ? sel : [sel];
+        var paths = [];
+        for (var i = 0; i < arr.length; i++) {
+            try { paths.push(arr[i].fsName); } catch (e2) {}
+        }
+        return JSON.stringify({ paths: paths });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
+}
+
+// Procura, dentro de um bin, o filho cujo getMediaPath() bate com targetPath.
+function _findBinChildByMediaPath(bin, targetPath) {
+    var target = String(targetPath || "").replace(/\\/g, "/").toLowerCase();
+    if (!target) return null;
+    for (var i = 0; i < bin.children.numItems; i++) {
+        var c = bin.children[i];
+        try {
+            if (typeof c.getMediaPath === "function") {
+                var mp = String(c.getMediaPath() || "").replace(/\\/g, "/").toLowerCase();
+                if (mp === target) return c;
+            }
+        } catch (e) {}
+    }
+    return null;
+}
+
+// Cria/garante o bin PROD_<folder>, importa todos os arquivos e renomeia o
+// item de referência (a imagem escolhida) para "png" (o que o resto do plugin
+// espera como foto do produto). Retorna resumo.
+function addProductMedia(folder, filePathsJSON, refPath) {
+    try {
+        var paths = JSON.parse(filePathsJSON);
+        var bin = ensureProductBin(folder);
+        var imported = 0, failed = [];
+        for (var i = 0; i < paths.length; i++) {
+            var p = paths[i];
+            try {
+                var f = new File(p);
+                if (!f.exists) { failed.push(p); continue; }
+                app.project.importFiles([p], true, bin, false);
+                imported++;
+            } catch (eImp) { failed.push(p); }
+        }
+        var refResult = "nenhuma";
+        if (refPath) {
+            var item = _findBinChildByMediaPath(bin, refPath);
+            if (item) {
+                try { item.name = "png"; refResult = "ok (png)"; }
+                catch (eR) { refResult = "rename falhou: " + eR.message; }
+            } else {
+                refResult = "ref não encontrada no bin";
+            }
+        }
+        try { app.project.save(); } catch (eS) {}
+        return JSON.stringify({ ok: true, bin: "PROD_" + String(folder), imported: imported, failed: failed, ref: refResult });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
+}
+
+function _seqExists(name) {
+    try {
+        for (var i = 0; i < app.project.sequences.numSequences; i++) {
+            if (app.project.sequences[i].name === name) return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+// Cria UMA sequência vazia com o nome dado. Tenta métodos em cascata
+// (versões diferentes do Premiere expõem APIs diferentes).
+function _createEmptySequence(name) {
+    var attempts = [];
+    var placeholder = "AEID_" + String(name).replace(/[^A-Za-z0-9]/g, "_");
+    // Método 1: createNewSequence(name, placeholderID) → usa preset/settings default
+    try {
+        app.project.createNewSequence(name, placeholder);
+        if (_seqExists(name)) return { ok: true, via: "default" };
+        attempts.push("createNewSequence: sem sequência nova");
+    } catch (e) { attempts.push("createNewSequence: " + e.message); }
+    // Método 2: QE DOM newSequence
+    try {
+        app.enableQE();
+        if (typeof qe !== "undefined" && qe.project && typeof qe.project.newSequence === "function") {
+            qe.project.newSequence(name, "");
+            if (_seqExists(name)) return { ok: true, via: "qe" };
+            attempts.push("qe.newSequence: sem sequência nova");
+        } else {
+            attempts.push("qe.newSequence: indisponível");
+        }
+    } catch (e2) { attempts.push("qe.newSequence: " + e2.message); }
+    return { ok: false, attempts: attempts };
+}
+
+// Cria as sequências de template VAZIAS nomeadas (pula as que já existem).
+function createTemplateSequences(namesJSON) {
+    try {
+        var names = JSON.parse(namesJSON);
+        var created = [], skipped = [], failed = [];
+        var savedActive = null;
+        try { savedActive = app.project.activeSequence; } catch (eA) {}
+        for (var i = 0; i < names.length; i++) {
+            var nm = names[i];
+            if (_seqExists(nm)) { skipped.push(nm); continue; }
+            var res = _createEmptySequence(nm);
+            if (res.ok) created.push(nm);
+            else failed.push({ name: nm, attempts: res.attempts });
+        }
+        // Restaura a sequência ativa original (criar sequência muda o foco)
+        if (savedActive) { try { app.project.activeSequence = savedActive; } catch (eR) {} }
+        try { app.project.save(); } catch (eS) {}
+        return JSON.stringify({ ok: true, created: created, skipped: skipped, failed: failed });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
 }
 
 // Acha um clip na timeline cujo nome contém nameSub e que começa perto de startSec.

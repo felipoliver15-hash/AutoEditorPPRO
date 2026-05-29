@@ -17,8 +17,8 @@ document.addEventListener("DOMContentLoaded", function () {
     restoreStockFolder(); // pasta de stock é global (todos os projetos)
     initIA();
     initTemplates();
+    initRecursos();
     initCapitulos();
-    initConfig();
     refreshSequenceInfo();
     initProjectPersistence();
 });
@@ -41,8 +41,7 @@ function initTabs() {
 
 function initCapitulos() {
     var btn = document.getElementById("btn-copy-chapters");
-    if (!btn) return;
-    btn.addEventListener("click", function () {
+    if (btn) btn.addEventListener("click", function () {
         var ta = document.getElementById("chapters-text");
         var status = document.getElementById("chapters-copy-status");
         if (!ta || !ta.value.trim()) {
@@ -53,6 +52,28 @@ function initCapitulos() {
         var ok = false;
         try { ok = document.execCommand("copy"); } catch (e) {}
         if (status) status.textContent = ok ? "copiado!" : "selecione e copie manualmente (Ctrl+C)";
+    });
+
+    var rbtn = document.getElementById("btn-refresh-chapters");
+    if (rbtn) rbtn.addEventListener("click", refreshChaptersFromMarkers);
+}
+
+// Relê os marcadores de sequência da timeline e regera os tempos dos capítulos
+// (caso o usuário tenha movido algum marcador depois da montagem).
+function refreshChaptersFromMarkers() {
+    var status = document.getElementById("chapters-refresh-status");
+    if (status) status.textContent = "lendo marcadores…";
+    cs.evalScript("getChaptersFromMarkers()", function (raw) {
+        var r = {};
+        try { r = JSON.parse(raw); } catch (e) {}
+        if (r && r.ok && r.chapters && r.chapters.length) {
+            renderChapters(r.chapters);
+            if (status) status.textContent = r.chapters.length + " capítulo(s) atualizado(s)";
+        } else if (r && r.ok) {
+            if (status) status.textContent = "nenhum marcador na sequência ativa";
+        } else {
+            if (status) status.textContent = "erro: " + (r.error || "desconhecido");
+        }
     });
 }
 
@@ -285,6 +306,257 @@ function initMontar() {
     document.getElementById("btn-load-json").addEventListener("click", openJSONPicker);
     document.getElementById("btn-load-srt").addEventListener("click",  openSRTPicker);
     document.getElementById("btn-mount").addEventListener("click", mountVideo);
+}
+
+// ─── RECURSOS (setup: bins de produto + sequências de template) ───────────────
+
+var TEMPLATE_SEQ_NAMES = [
+    "[TEMPLATE]PRODUTO",
+    "[TEMPLATE]PRECO",
+    "[TEMPLATE]LOWERTHIRD",
+    "[TEMPLATE]TRANSICAO_1",
+    "[TEMPLATE]TRANSICAO_2",
+    "[TEMPLATE]LIKE"
+];
+
+var REC_IMG_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp"];
+
+// Card pendente: só 1 por vez (evita corrida na numeração de PROD_N).
+var _pendingProductCard = null;
+
+function recLog(msg, type) {
+    var box = document.getElementById("rec-log");
+    if (!box) return;
+    var line = document.createElement("div");
+    line.className = "log-line " + (type || "info");
+    line.textContent = msg;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+}
+function clearRecLog() {
+    var box = document.getElementById("rec-log");
+    if (box) box.innerHTML = "";
+}
+
+function initRecursos() {
+    var addBtn = document.getElementById("btn-add-product");
+    if (addBtn) addBtn.addEventListener("click", startNewProductCard);
+    var tplBtn = document.getElementById("btn-create-templates");
+    if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
+}
+
+function recIsImage(path) {
+    var m = String(path).toLowerCase().match(/\.([a-z0-9]+)$/);
+    return !!(m && REC_IMG_EXTS.indexOf(m[1]) >= 0);
+}
+function recBaseName(path) {
+    return String(path).replace(/[\\\/]+$/, "").split(/[\\\/]/).pop();
+}
+
+function startNewProductCard() {
+    if (_pendingProductCard) {
+        recLog("Finalize ou cancele o produto atual antes de adicionar outro.", "warn");
+        return;
+    }
+    var addBtn = document.getElementById("btn-add-product");
+    if (addBtn) addBtn.disabled = true;
+    cs.evalScript("getNextProductNumber()", function (raw) {
+        var n = 1;
+        try { var r = JSON.parse(raw); if (r && r.next) n = r.next; } catch (e) {}
+        renderProductCard(n);
+    });
+}
+
+function renderProductCard(n) {
+    var container = document.getElementById("products-container");
+    var card = document.createElement("div");
+    card.style.cssText = "border:1px solid #444;border-radius:6px;padding:10px;margin-top:10px;background:#2a2a2a";
+
+    var files = [];      // {path, name, isImage}
+    var refPath = null;  // imagem marcada como referência (png)
+
+    var title = document.createElement("div");
+    title.style.cssText = "font-weight:bold;margin-bottom:6px";
+    title.textContent = "PROD_" + n;
+    card.appendChild(title);
+
+    var drop = document.createElement("div");
+    drop.style.cssText = "border:2px dashed #555;border-radius:6px;padding:14px;text-align:center;color:#999;cursor:pointer;margin-bottom:8px";
+    drop.textContent = "Arraste vídeos e imagens aqui, ou clique para selecionar";
+    card.appendChild(drop);
+
+    var listEl = document.createElement("div");
+    listEl.style.cssText = "font-family:monospace;font-size:11px;margin-bottom:8px";
+    card.appendChild(listEl);
+
+    var actions = document.createElement("div");
+    actions.className = "row-space";
+    var createBtn = document.createElement("button");
+    createBtn.className = "btn-primary flex1";
+    createBtn.textContent = "Criar PROD_" + n;
+    createBtn.disabled = true;
+    var cancelBtn = document.createElement("button");
+    cancelBtn.className = "flex1";
+    cancelBtn.textContent = "Cancelar";
+    actions.appendChild(createBtn);
+    actions.appendChild(cancelBtn);
+    card.appendChild(actions);
+
+    container.appendChild(card);
+    _pendingProductCard = card;
+
+    function releaseAddBtn() {
+        _pendingProductCard = null;
+        var addBtn = document.getElementById("btn-add-product");
+        if (addBtn) addBtn.disabled = false;
+    }
+
+    function renderList() {
+        listEl.innerHTML = "";
+        if (!files.length) {
+            listEl.innerHTML = "<span style='color:#777'>nenhum arquivo adicionado</span>";
+            createBtn.disabled = true;
+            return;
+        }
+        // garante uma referência válida (1ª imagem, se houver)
+        if (!refPath || !files.some(function (f) { return f.path === refPath; })) {
+            var firstImg = files.filter(function (f) { return f.isImage; })[0];
+            refPath = firstImg ? firstImg.path : null;
+        }
+        files.forEach(function (f) {
+            var row = document.createElement("div");
+            row.style.cssText = "display:flex;align-items:center;gap:6px;padding:2px 0";
+
+            var tag = document.createElement("span");
+            tag.textContent = f.isImage ? "🖼" : "🎬";
+            row.appendChild(tag);
+
+            var nameSpan = document.createElement("span");
+            nameSpan.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+            nameSpan.textContent = f.name;
+            row.appendChild(nameSpan);
+
+            if (f.isImage) {
+                var lbl = document.createElement("label");
+                lbl.style.cssText = "font-size:10px;color:#9cf;cursor:pointer;white-space:nowrap";
+                var radio = document.createElement("input");
+                radio.type = "radio";
+                radio.name = "ref_prod_" + n;
+                radio.checked = (f.path === refPath);
+                radio.addEventListener("change", function () { refPath = f.path; });
+                lbl.appendChild(radio);
+                lbl.appendChild(document.createTextNode(" ref (png)"));
+                row.appendChild(lbl);
+            }
+
+            var rm = document.createElement("button");
+            rm.textContent = "✕";
+            rm.style.cssText = "background:none;border:none;color:#c66;cursor:pointer";
+            rm.addEventListener("click", function () {
+                files = files.filter(function (x) { return x.path !== f.path; });
+                renderList();
+            });
+            row.appendChild(rm);
+
+            listEl.appendChild(row);
+        });
+        createBtn.disabled = false;
+    }
+
+    function addPaths(paths) {
+        (paths || []).forEach(function (p) {
+            if (!p) return;
+            if (files.some(function (f) { return f.path === p; })) return;
+            files.push({ path: p, name: recBaseName(p), isImage: recIsImage(p) });
+        });
+        renderList();
+    }
+
+    drop.addEventListener("click", function () {
+        cs.evalScript("selectMediaFiles()", function (raw) {
+            try {
+                var r = JSON.parse(raw);
+                if (r && r.paths) addPaths(r.paths);
+                else if (r && r.error) recLog("Erro ao selecionar: " + r.error, "err");
+            } catch (e) { recLog("Resposta inválida ao selecionar arquivos.", "err"); }
+        });
+    });
+    drop.addEventListener("dragover", function (e) {
+        e.preventDefault(); e.stopPropagation(); drop.style.borderColor = "#9cf";
+    });
+    drop.addEventListener("dragleave", function (e) {
+        e.preventDefault(); e.stopPropagation(); drop.style.borderColor = "#555";
+    });
+    drop.addEventListener("drop", function (e) {
+        e.preventDefault(); e.stopPropagation(); drop.style.borderColor = "#555";
+        var dropped = [];
+        var fl = e.dataTransfer && e.dataTransfer.files;
+        if (fl) for (var i = 0; i < fl.length; i++) { if (fl[i].path) dropped.push(fl[i].path); }
+        if (dropped.length) addPaths(dropped);
+        else recLog("Arrastar não retornou o caminho nesta versão — use o clique para selecionar.", "warn");
+    });
+
+    cancelBtn.addEventListener("click", function () {
+        try { container.removeChild(card); } catch (e) {}
+        releaseAddBtn();
+    });
+
+    createBtn.addEventListener("click", function () {
+        if (!files.length) return;
+        createBtn.disabled = true; cancelBtn.disabled = true;
+        var paths = files.map(function (f) { return f.path; });
+        var arg = JSON.stringify(n) + "," +
+                  JSON.stringify(JSON.stringify(paths)) + "," +
+                  JSON.stringify(refPath || "");
+        recLog("Criando bin PROD_" + n + " com " + paths.length + " arquivo(s)…");
+        cs.evalScript("addProductMedia(" + arg + ")", function (raw) {
+            var r = {};
+            try { r = JSON.parse(raw); } catch (e) {}
+            if (r && r.ok) {
+                var msg = "✓ PROD_" + n + " criado — " + r.imported + " importado(s)";
+                if (r.failed && r.failed.length) msg += ", " + r.failed.length + " falhou";
+                msg += " | referência: " + r.ref;
+                recLog(msg, "ok");
+                drop.style.display = "none";
+                listEl.style.opacity = "0.6";
+                title.textContent = "✓ PROD_" + n + " (criado)";
+                createBtn.style.display = "none";
+                cancelBtn.style.display = "none";
+            } else {
+                recLog("✗ Erro ao criar PROD_" + n + ": " + (r.error || raw), "err");
+                createBtn.disabled = false; cancelBtn.disabled = false;
+            }
+            releaseAddBtn();
+        });
+    });
+
+    renderList();
+}
+
+function createTemplateSequencesAction() {
+    var btn = document.getElementById("btn-create-templates");
+    if (btn) btn.disabled = true;
+    recLog("Criando sequências de template…");
+    var arg = JSON.stringify(JSON.stringify(TEMPLATE_SEQ_NAMES));
+    cs.evalScript("createTemplateSequences(" + arg + ")", function (raw) {
+        var r = {};
+        try { r = JSON.parse(raw); } catch (e) {}
+        if (r && r.ok) {
+            if (r.created && r.created.length) recLog("✓ Criadas: " + r.created.join(", "), "ok");
+            if (r.skipped && r.skipped.length) recLog("• Já existiam (puladas): " + r.skipped.join(", "));
+            if (r.failed && r.failed.length) {
+                r.failed.forEach(function (f) {
+                    recLog("✗ Falhou: " + f.name + " — " + (f.attempts ? f.attempts.join(" | ") : ""), "err");
+                });
+            }
+            if ((!r.created || !r.created.length) && (!r.failed || !r.failed.length)) {
+                recLog("Tudo certo — todas as sequências já existiam.", "ok");
+            }
+        } else {
+            recLog("✗ Erro: " + (r.error || raw), "err");
+        }
+        if (btn) btn.disabled = false;
+    });
 }
 
 // ─── IA (Gemini image generation) ─────────────────────────────────────────────
@@ -2688,7 +2960,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
 
 // Monta os itens visuais da recapitulação final (aba conclusion.recap).
 // Para cada bloco (frase-âncora + lista de produtos), divide o tempo entre os
-// produtos e gera: SLIDERIGHT (entrada) + LOWERTHIRD com o nome + imagens gen_*
+// produtos e gera: TRANSICAO_1 (entrada) + LOWERTHIRD com o nome + imagens gen_*
 // em loop. Retorna um array de timeline items prontos (com time_seconds resolvido).
 function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, binMedia) {
     var out = [];
@@ -2752,7 +3024,7 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
 
             // Transição de entrada
             out.push({
-                type: "template_insert", template: "SLIDERIGHT",
+                type: "template_insert", template: "TRANSICAO_1",
                 anchor: "marker", offset_seconds: 0, track: 5,
                 time_seconds: s0, _recap: true
             });
@@ -2826,7 +3098,7 @@ function buildKeyPointItems(keyPoints, durations, mountProducts) {
         cursor = t;
         ctaStarts.push(t);
 
-        // Transição de ENTRADA no CTA (ex: SLIDERIGHT) — corte do preço pro stock.
+        // Transição de ENTRADA no CTA (ex: TRANSICAO_1) — corte do preço pro stock.
         // Alinhada ao marcador, no início do CTA. Track própria (default 5, igual
         // às outras transições, acima do conteúdo).
         if (kp.transition) {

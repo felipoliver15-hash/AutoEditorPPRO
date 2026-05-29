@@ -61,10 +61,10 @@ Para CADA produto, a `timeline` é SEMPRE estes 5 itens, nesta ordem:
 
 ```json
 [
-  { "after_phrase": "<FRASE_INTRO>", "type": "template_insert", "template": "DCIRCLES",   "anchor": "marker", "offset_seconds": 0, "track": 5 },
+  { "after_phrase": "<FRASE_INTRO>", "type": "template_insert", "template": "TRANSICAO_2",   "anchor": "marker", "offset_seconds": 0, "track": 5 },
   { "after_phrase": "<FRASE_INTRO>", "type": "template_insert", "template": "PRODUTO",     "track": 1 },
-  { "after_phrase": "<FRASE_INTRO>", "type": "template_insert", "template": "SLIDERIGHT",  "anchor": "marker", "offset_seconds": 5, "track": 5 },
-  { "after_phrase": "<FRASE_PRECO>", "type": "template_insert", "template": "SLIDERIGHT",  "anchor": "marker", "offset_seconds": 0, "track": 5 },
+  { "after_phrase": "<FRASE_INTRO>", "type": "template_insert", "template": "TRANSICAO_1",  "anchor": "marker", "offset_seconds": 5, "track": 5 },
+  { "after_phrase": "<FRASE_PRECO>", "type": "template_insert", "template": "TRANSICAO_1",  "anchor": "marker", "offset_seconds": 0, "track": 5 },
   { "after_phrase": "<FRASE_PRECO>", "type": "template_insert", "template": "PRECO",       "track": 1 }
 ]
 ```
@@ -72,7 +72,7 @@ Para CADA produto, a `timeline` é SEMPRE estes 5 itens, nesta ordem:
 - `<FRASE_INTRO>` = o momento em que o produto é **apresentado** (ex: "a primeira da lista é",
   "próxima dessa tanto em proposta", o nome do produto sendo dito).
 - `<FRASE_PRECO>` = o momento em que a **faixa de preço** é dita (ex: "330 e 420 reais").
-- DCIRCLES = transição que entra no produto. As duas SLIDERIGHT = transição no fim da
+- TRANSICAO_2 = transição que entra no produto. As duas TRANSICAO_1 = transição no fim da
   intro e na entrada do preço. NÃO mude templates, tracks nem offsets.
 
 ## CAMPOS DO PRODUTO
@@ -191,8 +191,8 @@ meio e no fim do vídeo), adicione uma entrada com `after_phrase` distinta de ca
 
 ```json
 "key_points": [
-  { "after_phrase": "se inscreve no canal", "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "SLIDERIGHT", "stock_track": 2, "mogrt_track": 3 },
-  { "after_phrase": "se inscreve lá",        "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "SLIDERIGHT", "stock_track": 2, "mogrt_track": 3 }
+  { "after_phrase": "se inscreve no canal", "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "TRANSICAO_1", "stock_track": 2, "mogrt_track": 3 },
+  { "after_phrase": "se inscreve lá",        "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "TRANSICAO_1", "stock_track": 2, "mogrt_track": 3 }
 ]
 ```
 
@@ -237,10 +237,10 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
         "top-down flat lay of the circular saw with its blade guard and parallel guide, clean neutral background"
       ],
       "timeline": [
-        { "after_phrase": "primeira da lista é", "type": "template_insert", "template": "DCIRCLES",   "anchor": "marker", "offset_seconds": 0, "track": 5 },
+        { "after_phrase": "primeira da lista é", "type": "template_insert", "template": "TRANSICAO_2",   "anchor": "marker", "offset_seconds": 0, "track": 5 },
         { "after_phrase": "primeira da lista é", "type": "template_insert", "template": "PRODUTO",     "track": 1 },
-        { "after_phrase": "primeira da lista é", "type": "template_insert", "template": "SLIDERIGHT",  "anchor": "marker", "offset_seconds": 5, "track": 5 },
-        { "after_phrase": "330 e 420 reais",     "type": "template_insert", "template": "SLIDERIGHT",  "anchor": "marker", "offset_seconds": 0, "track": 5 },
+        { "after_phrase": "primeira da lista é", "type": "template_insert", "template": "TRANSICAO_1",  "anchor": "marker", "offset_seconds": 5, "track": 5 },
+        { "after_phrase": "330 e 420 reais",     "type": "template_insert", "template": "TRANSICAO_1",  "anchor": "marker", "offset_seconds": 0, "track": 5 },
         { "after_phrase": "330 e 420 reais",     "type": "template_insert", "template": "PRECO",       "track": 1 }
       ],
       "lower_thirds": [
@@ -271,8 +271,8 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
   },
 
   "key_points": [
-    { "after_phrase": "se inscreve no canal", "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "SLIDERIGHT", "stock_track": 2, "mogrt_track": 3 },
-    { "after_phrase": "se inscreve lá",        "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "SLIDERIGHT", "stock_track": 2, "mogrt_track": 3 }
+    { "after_phrase": "se inscreve no canal", "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "TRANSICAO_1", "stock_track": 2, "mogrt_track": 3 },
+    { "after_phrase": "se inscreve lá",        "stock_folder": "Joinha", "mogrt": "LIKE", "transition": "TRANSICAO_1", "stock_track": 2, "mogrt_track": 3 }
   ]
 }
 ```
@@ -282,7 +282,7 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 
 ## CHECKLIST ANTES DE ENTREGAR
 1. JSON válido, só o objeto (nada fora dele).
-2. 1 produto por item, com os 5 itens FIXOS de timeline (DCIRCLES, PRODUTO, SLIDERIGHT+5, SLIDERIGHT+0, PRECO).
+2. 1 produto por item, com os 5 itens FIXOS de timeline (TRANSICAO_2, PRODUTO, TRANSICAO_1+5, TRANSICAO_1+0, PRECO).
 3. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
 4. Exatamente 7 `image_prompts` em inglês por produto.
 5. Lower thirds nos specs (curtas), recap se houver, key_points pra cada CTA.
