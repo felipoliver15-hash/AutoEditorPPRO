@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Auto Editor</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="montar">Montar</button>
+    <button class="tab" data-tab="ia">IA</button>
+    <button class="tab" data-tab="templates">Templates</button>
+    <button class="tab" data-tab="capitulos">Capítulos</button>
+    <button class="tab" data-tab="config">Config</button>
+  </div>
+
+  <!-- ── MONTAR ───────────────────────────────────────────── -->
+  <div id="tab-montar" class="tab-content active">
+
+    <div class="section root-folder-section">
+      <label class="root-folder-label">Pasta de stock videos (opcional)</label>
+      <div class="row-space">
+        <input type="text" id="stock-folder" class="flex1 root-folder-input" placeholder="Opcional — para ilustrar pontos-chave com stock...">
+        <button id="btn-browse-stock" class="btn-browse">Procurar</button>
+      </div>
+      <div id="stock-folder-status" class="root-folder-hint">nenhuma pasta selecionada</div>
+    </div>
+
+    <div class="section">
+      <label>Sequência ativa</label>
+      <div class="row-space">
+        <div id="seq-name" class="info-box flex1">—</div>
+        <button onclick="refreshSequenceInfo()" class="btn-icon" title="Atualizar">↻</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <label>Transcrição (SRT)</label>
+      <div class="row-space">
+        <button id="btn-load-srt">Carregar arquivo</button>
+        <span id="srt-status" class="badge">não carregada</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <label>JSON de mapeamento</label>
+      <div class="row-space">
+        <input type="text" id="json-path" class="flex1" placeholder="nenhum arquivo carregado" readonly>
+        <button id="btn-load-json">Abrir</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <button id="btn-mount" class="btn-primary" disabled>Montar Vídeo</button>
+    </div>
+
+    <div class="section grow">
+      <div class="row-space">
+        <label>Log</label>
+        <button onclick="copyLog()" class="btn-log" title="Copiar log">⎘</button>
+        <button onclick="clearLog()" class="btn-log" title="Limpar log">🗑</button>
+      </div>
+      <div id="log" class="log-box"></div>
+    </div>
+
+  </div>
+
+  <!-- ── IA (Geração de imagens via Gemini) ─────────────────── -->
+  <div id="tab-ia" class="tab-content">
+
+    <div class="section">
+      <label>Chave da API (Google AI Studio)</label>
+      <div class="row-space">
+        <input type="password" id="gemini-api-key" class="flex1" placeholder="Cole sua chave do AI Studio aqui...">
+        <button id="btn-ia-test" class="btn-icon" title="Testar conexão">⚡</button>
+      </div>
+      <div id="gemini-key-status" class="root-folder-hint">nenhuma chave configurada</div>
+    </div>
+
+    <div class="section">
+      <label>Modelo</label>
+      <input type="text" id="gemini-model" list="gemini-models-list"
+             value="gemini-3.1-flash-image-preview"
+             placeholder="Escolha um modelo ou digite outro">
+      <datalist id="gemini-models-list">
+        <option value="gemini-3.1-flash-image-preview">3.1 Flash Image Preview — geralmente free</option>
+        <option value="gemini-3-pro-image-preview">3 Pro Image Preview</option>
+        <option value="gemini-2.5-flash-image">2.5 Flash Image (Nano Banana) — pago</option>
+        <option value="gemini-2.5-flash-image-preview">2.5 Flash Image Preview</option>
+        <option value="gemini-2.0-flash-exp">2.0 Flash Exp (legacy)</option>
+      </datalist>
+      <p class="hint" style="margin-top:4px">
+        Clique em ⚡ pra listar modelos de imagem disponíveis na sua chave.
+        Modelos <code>imagen-*</code> usam endpoint diferente (predict) — ainda não suportados.
+      </p>
+    </div>
+
+    <div class="section">
+      <label>Duração de cada imagem (segundos)</label>
+      <input type="text" id="ia-slot-duration" value="5" placeholder="5">
+    </div>
+
+    <div class="section">
+      <label>Imagens por produto (máximo)</label>
+      <input type="text" id="ia-num-images" value="7" placeholder="7">
+      <p class="hint" id="ia-cycle-hint">≈ 35s por ciclo de imagens</p>
+    </div>
+
+    <div class="section">
+      <label class="checkbox-row">
+        <input type="checkbox" id="ia-apply-zoom-preset">
+        <span>Aplicar preset de zoom após mount (alterna ZOOMIN/ZOOMOUT)</span>
+      </label>
+      <p class="hint">
+        Quando ativo, após o mount o plugin pega o clip da sequência
+        <code>[PRESET]ZOOMIN</code> (ou <code>[PRESET]ZOOMOUT</code>) e
+        copia os atributos (efeitos + keyframes) pras imagens auto-fill —
+        alternando: pares = ZOOMIN, ímpares = ZOOMOUT.
+        <br><br>
+        <b>Setup único:</b> crie 2 sequências chamadas
+        <code>[PRESET]ZOOMIN</code> e <code>[PRESET]ZOOMOUT</code>, coloque
+        um clip qualquer em cada uma (Solid Color ou qualquer coisa) e
+        aplique manualmente o preset de zoom desejado (Transform com
+        keyframes de Scale 100→110 etc).
+      </p>
+    </div>
+
+
+    <div class="section">
+      <p class="hint">
+        Para cada produto no JSON carregado, gera imagens via Gemini usando
+        <code>png.png</code> como referência visual. Salva como
+        <code>{folder}/gen_1.png</code>, <code>gen_2.png</code>, etc. Usa os
+        textos em <code>image_prompts</code> de cada produto.
+      </p>
+    </div>
+
+    <div class="section">
+      <button id="btn-ia-generate" class="btn-primary" disabled>Gerar imagens dos produtos</button>
+      <button id="btn-ia-generate-missing" disabled>Gerar apenas faltantes</button>
+      <div class="row-space">
+        <button id="btn-ia-skip" class="flex1" disabled>Pular imagem atual</button>
+        <button id="btn-ia-cancel" class="flex1" disabled style="background:#7a2828;color:#fff">Cancelar tudo</button>
+      </div>
+    </div>
+
+
+    <div class="section grow">
+      <div class="row-space">
+        <label>Progresso</label>
+        <button onclick="copyIALog()" class="btn-log" title="Copiar log da IA">⎘</button>
+        <button onclick="clearIALog()" class="btn-log" title="Limpar log da IA">🗑</button>
+      </div>
+      <div id="ia-progress" class="log-box"></div>
+    </div>
+
+  </div>
+
+  <!-- ── TEMPLATES ────────────────────────────────────────── -->
+  <div id="tab-templates" class="tab-content">
+
+    <div class="section">
+      <p class="hint">
+        Nomeie suas sequências como <code>[TEMPLATE] NomeDoTemplate</code>
+        para que apareçam aqui. Use textos como <code>[[PRODUCT_NAME]]</code>
+        e marcadores como <code>insert:product_image</code> para mapear
+        onde o plugin deve substituir o conteúdo.
+      </p>
+    </div>
+
+    <div class="section">
+      <button id="btn-refresh-templates">Atualizar lista</button>
+    </div>
+
+    <div id="templates-list"></div>
+
+  </div>
+
+  <!-- ── CAPÍTULOS ────────────────────────────────────────── -->
+  <div id="tab-capitulos" class="tab-content">
+
+    <div class="section">
+      <p class="hint">
+        Capítulos gerados na montagem (formato do YouTube). Cole na descrição
+        do vídeo. O texto é editável antes de copiar. Marcadores correspondentes
+        são criados na timeline do Premiere.
+      </p>
+    </div>
+
+    <div class="section">
+      <textarea id="chapters-text" rows="10"
+        placeholder="Monte o vídeo na aba Montar para gerar os capítulos aqui."
+        style="width:100%; box-sizing:border-box; font-family:monospace; resize:vertical;"></textarea>
+    </div>
+
+    <div class="section">
+      <button id="btn-copy-chapters">Copiar capítulos</button>
+      <span id="chapters-copy-status" class="hint"></span>
+    </div>
+
+  </div>
+
+  <!-- ── CONFIG ───────────────────────────────────────────── -->
+  <div id="tab-config" class="tab-content">
+
+    <div class="section">
+      <label>Formato esperado do JSON (modo IA)</label>
+      <pre class="code-hint">{
+  "products": [
+    {
+      "brand": "Marca",
+      "name": "Modelo",
+      "price_min": "R$ 300",
+      "price_max": "R$ 380",
+      "folder": "1",
+      "image_prompts": [
+        "circular saw cutting wood on workbench, woodshop",
+        "saw resting on a stack of lumber at jobsite",
+        "wide shot of the saw on a tool bench"
+      ],
+      "timeline": [
+        {
+          "after_phrase": "trecho narrado",
+          "type": "template_insert",
+          "template": "PRODUTO",
+          "track": 1
+        },
+        {
+          "after_phrase": "trecho narrado",
+          "type": "template_insert",
+          "template": "PRECO",
+          "track": 1
+        }
+      ],
+      "lower_thirds": [
+        {
+          "after_phrase": "ela corta até 65mm de profundidade",
+          "info": "profundidade",
+          "sub_info": "até 65mm à 90º",
+          "duration": 4,
+          "track": 3
+        }
+      ]
+    }
+  ]
+}
+
+Estrutura de pastas:
+  pasta_raiz/
+  ├── 1/
+  │   ├── png.png   ← imagem transparente do produto (REFERÊNCIA da IA)
+  │   ├── gen_1.png ← gerada pela IA (auto)
+  │   ├── gen_2.png
+  │   └── gen_3.png
+  └── 2/
+      └── png.png
+
+Camadas do template (nomes exatos):
+  [[PRODUCT_BRAND]]     → marca
+  [[PRODUCT_NAME]]      → nome
+  [[PRODUCT_PRICE_MIN]] → preço mínimo
+  [[PRODUCT_PRICE_MAX]] → preço máximo
+  [[PRODUCT_IMAGE]]     → adjustment layer (substituído por png.png)
+
+LOWER THIRD (callout de specs técnicas):
+  Crie uma sequência chamada [TEMPLATE]LOWERTHIRD com 2 textos:
+    [[INFO]]     → label (ex: "profundidade")
+    [[SUB-INFO]] → valor (ex: "até 65mm à 90º")
+  Cada entrada em lower_thirds vira uma cópia independente
+  do template inserida em after_phrase (track 3 default,
+  4 segundos default). Quantos quiser por produto.
+
+  ⚠ Limite de caracteres pro SUB-INFO:
+     Mantenha sub_info CURTO — máx ~22-25 chars pra
+     não ultrapassar a tela em 16:9 1080p com a fonte
+     bold do template. Textos longos vão ser cortados
+     visualmente nas bordas. Exemplos seguros:
+       OK:  "65mm a 90°"          (10 chars)
+       OK:  "1500W"                (5 chars)
+       OK:  "5800 rpm"             (8 chars)
+       OK:  "184mm • furo 15,9mm"  (19 chars)
+       RUIM: "184mm • furo 15,9mm (não-padrão BR)" (35 chars) → corta na tela
+     Pra valores longos, quebra em 2 lower thirds
+     sequenciais em vez de 1 só comprido.
+
+  ⚠ Placeholders devem ser digitados COM HÍFEN ASCII (-):
+     Se copiar/colar de outro lugar pode vir hífen Unicode
+     diferente (en-dash, non-breaking, etc) que parece igual
+     mas o plugin não reconhece. Em caso de dúvida, apaga
+     o placeholder e redigita do zero usando seu teclado.
+
+  ⚙ MODO EXPAND (animações responsivas):
+     MOGRTs com animações de entrada/saída que se adaptam
+     ao tamanho do clip (Premiere Composer etc) NÃO funcionam
+     bem aninhados — trimar a sequência aninhada apenas corta
+     a visualização. Solução: marca o checkbox "Expandir
+     conteúdo na timeline" na aba Templates do template
+     desejado. O plugin vai inserir os clips internos
+     diretamente na main timeline (cascateando tracks)
+     em vez de aninhar. Aí trimar/esticar funciona normal
+     e as animações se ajustam à duração.
+
+  ⚙ MODO MASTERCLIP (recomendado pra LOWERTHIRD com MOGRT):
+     A forma mais limpa de usar MOGRTs com cores e configurações
+     custom é arrastar o clip JÁ CONFIGURADO da timeline pra bin:
+
+     1. Crie sua sequência [TEMPLATE]LOWERTHIRD com o MOGRT
+        configurado (cores, posição, [[INFO]]/[[SUB-INFO]])
+     2. Arraste esse clip da timeline pra Project Panel (bin)
+     3. Renomeie o novo MasterClip pra "[TEMPLATE]LOWERTHIRD"
+        (pode deletar a sequência original se quiser)
+
+     O plugin detecta automaticamente: se existe um MasterClip
+     com nome [TEMPLATE]NAME, usa o caminho direto (insere
+     clip + substitui texto). Cor, posição, escala, efeitos,
+     tudo preservado. Animações responsivas funcionam nativamente
+     (basta trimar/esticar o clip na timeline). Sem clone, sem
+     expand, sem cópias na bin por instância.
+
+     Quando há tanto Sequence quanto MasterClip com o mesmo nome,
+     plugin PRIORIZA o MasterClip (caminho mais simples).
+
+  ⚙ TRANSIÇÕES (Premiere Composer e similares):
+     Transições do Composer são CLIPS (adjustment layers com efeito),
+     não efeitos aplicáveis por script. Mas dá pra automatizar:
+
+     1. Aplique a transição numa cena de teste — ela vira 2 clips
+        (adjustment layers) que se encontram NO CORTE
+     2. Crie uma Sequence [TEMPLATE]NomeDaTransicao
+     3. Cole esses 2 clips dentro dela, mantendo a junção entre eles
+        (= o ponto que deve cair sobre o corte do seu vídeo)
+     4. No JSON, use type:"template_insert" com anchor:"cut"
+
+     {
+       "after_phrase": "trecho antes do corte",
+       "type": "template_insert",
+       "template": "NomeDaTransicao",
+       "anchor": "cut",
+       "track": 5
+     }
+
+     anchor:"cut" → o plugin detecta a JUNÇÃO interna dos 2 clips
+     e alinha ELA com o timestamp resolvido (não o início). Auto-ativa
+     o modo expand. Os clips entram nas tracks corretas cascateando
+     a partir de "track". Os efeitos do Composer continuam vivos
+     (pode trimar/esticar depois). IMPORTANTE: use Sequence, não
+     MasterClip (transição tem 2+ clips).
+
+  ⚙ OFFSET DE TIMING (offset_seconds):
+     Qualquer item da timeline aceita offset_seconds pra ajuste fino
+     do ponto de inserção, sem mexer no transcript. Negativo = mais
+     cedo. Funciona em template_insert, product_image, lower_third.
+
+     {
+       "after_phrase": "...",
+       "type": "template_insert",
+       "template": "PRODUTO",
+       "offset_seconds": -0.4
+     }
+
+MÍDIA POR BIN (modelo atual):
+A fonte de mídia de cada produto é um BIN do projeto chamado PROD_1
+(produto 1), PROD_2, etc. Dentro de cada bin:
+ • uma imagem chamada "png" (ou png.png) = foto de referência do produto
+   (usada pela IA e como o produto nos cards PRODUTO/PRECO);
+ • seus vídeos e imagens (qualquer nome / qualquer lugar no PC).
+Na montagem (espaço PRODUTO→PRECO): entram os VÍDEOS primeiro (sem áudio,
+duração natural, cortados no preço), depois as IMAGENS do bin em loop até
+o preço. Vale também pra recap e pra fechar buracos pós-preço.
+
+GERAÇÃO POR IA (aba IA): usa a referência "png" do bin, salva as imagens
+em <pasta do .prproj>/AutoEditor_IA/PROD_N/ e IMPORTA pro bin PROD_N (cria
+o bin se não existir). Geração inteligente: mede os vídeos do bin + o
+segmento e gera só o necessário pra completar depois do vídeo (até o máximo).
+
+IMAGENS POR PRODUTO (aba IA): máximo de imagens geradas por produto
+(default 7) + duração média do ciclo (nº × duração por imagem).</pre>
+      <p class="hint">
+        Salve o projeto (.prproj) antes de gerar imagens (a pasta
+        AutoEditor_IA é criada ao lado dele). Vídeos: prefira mp4/mov
+        (medição de duração mais confiável que webm).
+      </p>
+    </div>
+
+    <div class="section">
+      <label>Capítulos do YouTube (gerados na montagem)</label>
+      <pre class="code-hint">A cada montagem o plugin gera os capítulos (aba Capítulos) e cria
+marcadores de sequência na timeline. Regras de posição:
+
+ • Introdução  → sempre 0:00
+ • Cada produto → no CORTE de entrada (time do card PRODUTO)
+ • Conclusão    → no FIM do preço do último produto
+
+Campos OPCIONAIS no JSON pra controlar os capítulos:
+
+ • product.chapter_title  → título custom do capítulo (default: marca + nome)
+ • product.cta_before     → true se um CTA de inscrição vem ANTES deste
+                            produto. O capítulo dele passa a começar no FIM
+                            do preço do produto anterior (= início do CTA),
+                            pra quem pular pro produto não perder o CTA.
+ • conclusion             → título do capítulo final (string).
+                            Ex: "conclusion": "Comparação/Conclusão".
+                            Use false pra não gerar o capítulo final.
+
+RECAP FINAL (recapitulação dos produtos no fim do vídeo):
+Quando a narração menciona os produtos de novo no final, o plugin mostra
+as imagens gen_* de cada um + etiqueta com o nome (LOWERTHIRD) + transição
+SLIDERIGHT. Estrutura:
+
+ "conclusion": {
+   "title": "Veredito",
+   "end_phrase": "Os links de todas as quatro",   // (opcional) onde a recap termina
+   "recap": [
+     { "after_phrase": "a WAP ou a Philco resolve", "products": ["1","2"] },
+     { "after_phrase": "é o melhor custo benefício", "products": ["3"] },
+     { "after_phrase": "a Makita é a escolha",       "products": ["4"] }
+   ]
+ }
+
+ • cada item da recap = uma menção (frase) + os produtos citados (por folder)
+ • o bloco vai da frase até a próxima menção (último = end_phrase ou ~5s/produto)
+ • blocos com vários produtos dividem o tempo igualmente, com slide entre eles
+
+PONTOS-CHAVE (ilustrar momentos com stock + MOGRT):
+Configure a "Pasta de stock videos" na aba Montar. Cada ponto-chave pega um
+vídeo ALEATÓRIO de uma subpasta do stock e/ou insere um MOGRT por cima.
+
+ "key_points": [
+   {
+     "after_phrase": "se inscreve lá",   // gatilho na narração
+     "stock_folder": "Joinha",           // subpasta do stock (vídeo aleatório)
+     "mogrt": "LIKE",                     // insere [TEMPLATE]LIKE por cima (opcional)
+     "stock_track": 1,                    // (opcional) track do stock — default 1
+     "mogrt_track": 2,                    // (opcional) track do MOGRT — default 2
+     "duration": 5                        // (opcional) senão usa a duração do MOGRT
+   }
+ ]
+
+ • stock_folder e mogrt são ambos opcionais (pode ter só um dos dois)
+ • o stock entra na track 1 (default) e o MOGRT logo acima (track 2)
+ • a ilustração vai da frase-gatilho até o INÍCIO do próximo produto (não invade
+   a introdução dele). Sem próximo produto (CTA do fim), usa a duração natural.
+ • o STOCK preenche a janela: se o vídeo for MAIOR, é cortado antes da intro do
+   próximo produto; se for MENOR, é esticado via speed/duration até lá.
+ • o MOGRT (LIKE) toca na duração NATURAL (sem speed/corte).
+ • o PRECO do produto anterior ao CTA termina no início do CTA (não cobre o stock).
+ • transition (opcional): template de transição na ENTRADA do CTA (ex: "SLIDERIGHT")
+   — alinhada ao marcador, faz o corte do preço pro stock. transition_track default 5.
+ • stock_track/mogrt_track: deixe o stock/LIKE ACIMA do conteúdo de produto (track 1)
+   pra não brigar com o card de introdução. Ex: stock_track 2, mogrt_track 3.
+ • repita o ponto-chave pra cada ocorrência (ex: um CTA no meio e outro no fim,
+   com frases-gatilho diferentes).</pre>
+    </div>
+
+  </div>
+
+  <script src="js/CSInterface.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

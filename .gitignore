@@ -1,0 +1,13 @@
+# Arquivo solto/junk
+/Auto
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Mídia gerada pela IA (fica ao lado do .prproj, não no plugin)
+AutoEditor_IA/
+
+# Node (caso algum dia)
+node_modules/
