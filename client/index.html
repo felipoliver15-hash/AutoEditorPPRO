@@ -181,34 +181,24 @@
   <div id="tab-recursos" class="tab-content">
 
     <div class="section">
-      <p class="hint">
-        Setup rápido do projeto: crie os bins de produto (PROD_1, PROD_2…)
-        com suas mídias e gere as sequências de template vazias já nomeadas.
-        Assim não precisa criar bin nem nomear template na mão.
-      </p>
-    </div>
-
-    <div class="section">
-      <label>Produtos (bins PROD_N)</label>
+      <label>Produtos</label>
       <button id="btn-add-product" class="btn-primary">+ Adicionar Produto</button>
       <div id="products-container"></div>
     </div>
 
-    <div class="section">
+    <div id="tpl-section" class="section" style="display:none">
       <label>Sequências de template</label>
       <p class="hint">
-        Cria sequências VAZIAS já nomeadas (pula as que já existem). Você desenha
-        o conteúdo dentro de cada uma depois. Padrão do plugin:
-        <code>[TEMPLATE]PRODUTO</code>, <code>[TEMPLATE]PRECO</code>,
-        <code>[TEMPLATE]LOWERTHIRD</code>, <code>[TEMPLATE]TRANSICAO_1</code>,
-        <code>[TEMPLATE]TRANSICAO_2</code>, <code>[TEMPLATE]LIKE</code>.
+        Faltam estas sequências no projeto: <span id="tpl-missing-list"></span>.
+        Clique pra criar (vazias, você desenha o conteúdo depois).
       </p>
-      <button id="btn-create-templates">Criar Sequências de Template</button>
+      <button id="btn-create-templates">Criar Sequências Faltantes</button>
     </div>
 
     <div class="section grow">
       <div class="row-space">
         <label>Status</label>
+        <button onclick="copyRecLog()" class="btn-log" title="Copiar status">⎘</button>
         <button onclick="clearRecLog()" class="btn-log" title="Limpar status">🗑</button>
       </div>
       <div id="rec-log" class="log-box"></div>

@@ -9,5 +9,8 @@ Desktop.ini
 # Mídia gerada pela IA (fica ao lado do .prproj, não no plugin)
 AutoEditor_IA/
 
+# Vídeos baixados via yt-dlp (ficam ao lado do .prproj, não no plugin)
+AutoEditor_Downloads/
+
 # Node (caso algum dia)
 node_modules/

@@ -33,6 +33,7 @@ function initTabs() {
             btn.classList.add("active");
             document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
             if (btn.dataset.tab === "templates") refreshTemplates();
+            if (btn.dataset.tab === "recursos")  refreshTemplateSeqSection();
         });
     });
 }
@@ -337,12 +338,218 @@ function clearRecLog() {
     var box = document.getElementById("rec-log");
     if (box) box.innerHTML = "";
 }
+function copyRecLog() {
+    var lines = document.querySelectorAll("#rec-log .log-line");
+    var text  = Array.prototype.map.call(lines, function (l) { return l.textContent; }).join("\n");
+    if (!text) { recLog("Status está vazio.", "warn"); return; }
+    var ta = document.createElement("textarea");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+    recLog(ok ? "Status copiado." : "Falha ao copiar (selecione e use Ctrl+C).", ok ? "ok" : "warn");
+}
 
 function initRecursos() {
     var addBtn = document.getElementById("btn-add-product");
     if (addBtn) addBtn.addEventListener("click", startNewProductCard);
     var tplBtn = document.getElementById("btn-create-templates");
     if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
+    refreshTemplateSeqSection();
+
+}
+
+// Mostra a seção "Sequências de template" SÓ se houver alguma faltando.
+// Atualiza o hint pra listar exatamente as que faltam.
+function refreshTemplateSeqSection() {
+    var section = document.getElementById("tpl-section");
+    var listEl  = document.getElementById("tpl-missing-list");
+    if (!section) return;
+    var arg = JSON.stringify(JSON.stringify(TEMPLATE_SEQ_NAMES));
+    cs.evalScript("checkTemplateSequences(" + arg + ")", function (raw) {
+        var r = { missing: [] };
+        try { r = JSON.parse(raw); } catch (e) {}
+        var miss = (r && r.missing) || [];
+        if (!miss.length) {
+            section.style.display = "none";
+            return;
+        }
+        section.style.display = "";
+        if (listEl) {
+            listEl.innerHTML = miss.map(function (nm) { return '<code>' + nm + '</code>'; }).join(", ");
+        }
+    });
+}
+
+// ─── BAIXAR DO YOUTUBE ────────────────────────────────────────────────────────
+
+// Caminho raiz da extensão (onde fica bin/yt-dlp.exe) — via CSInterface.
+// SystemPath.EXTENSION é a forma oficial e confiável; $.fileName no host
+// retorna vazio quando chamado via evalScript, por isso evitamos lá.
+function getExtensionRootClient() {
+    try {
+        if (typeof SystemPath !== "undefined" && SystemPath.EXTENSION) {
+            return cs.getSystemPath(SystemPath.EXTENSION) || "";
+        }
+    } catch (e) {}
+    try { return cs.getSystemPath("extension") || ""; } catch (e) {}
+    return "";
+}
+
+// Detecta o ffmpeg. Tenta primeiro o EMBUTIDO (bin/ffmpeg.exe da extensão);
+// se não existir, tenta o do PATH. Retorna {ok, location, dir}:
+//   - location: caminho ou "ffmpeg" (PATH)
+//   - dir: pasta do executável (passada ao yt-dlp via --ffmpeg-location) ou null
+function detectFfmpeg(cb) {
+    var fs   = tryNodeRequire('fs');
+    var pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    if (fs && pmod && extDir) {
+        try {
+            var binDir = pmod.join(extDir, "bin");
+            var embedded = pmod.join(binDir, "ffmpeg.exe");
+            if (fs.existsSync(embedded)) {
+                cb({ ok: true, location: embedded, dir: binDir });
+                return;
+            }
+        } catch (e) {}
+    }
+    var cp = tryNodeRequire('child_process');
+    if (!cp) { cb({ ok: false, location: null, dir: null }); return; }
+    var done = false;
+    try {
+        var p = cp.spawn("ffmpeg", ["-version"], { windowsHide: true });
+        p.on("error", function () { if (!done) { done = true; cb({ ok: false, location: null, dir: null }); } });
+        p.on("close", function (code) {
+            if (!done) {
+                done = true;
+                if (code === 0) cb({ ok: true, location: "ffmpeg", dir: null });
+                else cb({ ok: false, location: null, dir: null });
+            }
+        });
+    } catch (e) { cb({ ok: false, location: null, dir: null }); }
+}
+
+// Baixa um vídeo do YouTube pra <projDir>/AutoEditor_Downloads/PROD_<folder>/.
+// NÃO importa pro bin — entrega o caminho final via onDone(err, filePath).
+// onProgress(text) é chamado durante o download (texto pra UI da barra).
+// Usado pela barrinha "Baixar do YouTube" dentro do card de Adicionar Produto.
+function downloadYTToFolder(folder, url, onProgress, onDone) {
+    if (!url) { onDone(new Error("Cole uma URL do YouTube primeiro.")); return; }
+    var extDir = getExtensionRootClient();
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        var prjDir = "";
+        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; } catch (e) {}
+        if (!prjDir) {
+            onDone(new Error("Salve o projeto antes (a pasta AutoEditor_Downloads vai ao lado do .prproj)."));
+            return;
+        }
+        runYtDlp(url, folder, extDir, prjDir, onProgress, onDone);
+    });
+}
+
+// Baixa o vídeo via yt-dlp. Entrega o caminho final via onDone(err, path).
+// onProgress(text) é chamado a cada 5% pra atualizar a UI (ex: rótulo do botão).
+function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
+    function fail(msg) { onDone(new Error(msg)); }
+    var cp   = tryNodeRequire('child_process');
+    var fs   = tryNodeRequire('fs');
+    var pmod = tryNodeRequire('path');
+    if (!cp || !fs || !pmod) { fail("Node child_process/fs/path indisponíveis."); return; }
+
+    var outDir = pmod.join(prjDir, "AutoEditor_Downloads", "PROD_" + folder);
+    try { fs.mkdirSync(outDir, { recursive: true }); }
+    catch (e) { fail("Erro criando pasta '" + outDir + "': " + e.message); return; }
+
+    var bundled = extDir ? pmod.join(extDir, "bin", "yt-dlp.exe") : "";
+    var hasBundled = false;
+    try { hasBundled = !!(bundled && fs.existsSync(bundled)); } catch (e) {}
+    var ytdlp = hasBundled ? bundled : "yt-dlp";
+
+    recLog(hasBundled ? "yt-dlp: embutido" : "yt-dlp: PATH");
+    recLog("Baixando → PRODUTO " + folder + " | " + url);
+
+    detectFfmpeg(function (ff) {
+        var formatSel, extraArgs = [];
+        if (ff.ok) {
+            recLog("ffmpeg: " + (ff.dir ? "embutido" : "PATH") + " — qualidade alta (merge vídeo+áudio).");
+            formatSel = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+            extraArgs = ["--merge-output-format", "mp4"];
+            if (ff.dir) extraArgs.push("--ffmpeg-location", ff.dir);
+        } else {
+            recLog("⚠ ffmpeg não encontrado — caindo pra MP4 progressivo (~360p no YouTube novo).", "warn");
+            formatSel = "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]";
+        }
+
+        var args = ["-f", formatSel].concat(extraArgs).concat([
+            "--no-playlist", "--restrict-filenames", "--no-warnings",
+            "-o", pmod.join(outDir, "%(title)s.%(ext)s"),
+            "--print", "after_move:%(filepath)s",
+            url
+        ]);
+
+        var ytFinalPath = "", lastPctReported = -1;
+        function processLine(line) {
+            var s = line.replace(/\r$/, "").trim();
+            if (!s) return;
+            var pct = s.match(/\[download\]\s+([\d.]+)%/);
+            if (pct) {
+                var n = Math.floor(parseFloat(pct[1]) / 5) * 5;
+                if (n !== lastPctReported) {
+                    recLog("  download " + n + "%");
+                    if (typeof onProgress === "function") onProgress("Baixando " + n + "%");
+                    lastPctReported = n;
+                }
+                return;
+            }
+            if (!ytFinalPath && /^[A-Za-z]:[\\\/]/.test(s) && /\.(mp4|mkv|webm|m4a)$/i.test(s)) {
+                ytFinalPath = s;
+                return;
+            }
+            if (/^ERROR\b/i.test(s)) { recLog(s, "err"); return; }
+            if (/^WARNING\b/i.test(s)) { recLog(s, "warn"); return; }
+        }
+        function drain(chunk, sink) {
+            sink.buf += chunk.toString();
+            var idx;
+            while ((idx = sink.buf.indexOf("\n")) >= 0) {
+                processLine(sink.buf.substring(0, idx));
+                sink.buf = sink.buf.substring(idx + 1);
+            }
+        }
+        var outSink = { buf: "" }, errSink = { buf: "" };
+
+        var ch;
+        try { ch = cp.spawn(ytdlp, args, { windowsHide: true }); }
+        catch (eSp) { fail("Falha ao iniciar yt-dlp: " + eSp.message); return; }
+        ch.stdout.on("data", function (d) { drain(d, outSink); });
+        ch.stderr.on("data", function (d) { drain(d, errSink); });
+        ch.on("error", function (e) { fail("Erro yt-dlp: " + e.message); });
+        ch.on("close", function (code) {
+            if (outSink.buf) processLine(outSink.buf);
+            if (errSink.buf) processLine(errSink.buf);
+            if (code !== 0) { fail("yt-dlp encerrou com código " + code); return; }
+            if (!ytFinalPath || !fs.existsSync(ytFinalPath)) {
+                try {
+                    var entries = fs.readdirSync(outDir).map(function (n) {
+                        var p = pmod.join(outDir, n);
+                        var st = fs.statSync(p);
+                        return { p: p, m: st.mtimeMs, isFile: st.isFile() };
+                    }).filter(function (e) { return e.isFile && /\.(mp4|mkv|webm|m4a)$/i.test(e.p); });
+                    entries.sort(function (a, b) { return b.m - a.m; });
+                    if (entries.length) ytFinalPath = entries[0].p;
+                } catch (eF) {}
+            }
+            if (!ytFinalPath) { fail("Download terminou mas não localizei o arquivo final."); return; }
+            recLog("✓ Baixado: " + ytFinalPath, "ok");
+            onDone(null, ytFinalPath);
+        });
+    });
 }
 
 function recIsImage(path) {
@@ -377,13 +584,49 @@ function renderProductCard(n) {
 
     var title = document.createElement("div");
     title.style.cssText = "font-weight:bold;margin-bottom:6px";
-    title.textContent = "PROD_" + n;
+    title.textContent = "PRODUTO " + n;
     card.appendChild(title);
 
     var drop = document.createElement("div");
     drop.style.cssText = "border:2px dashed #555;border-radius:6px;padding:14px;text-align:center;color:#999;cursor:pointer;margin-bottom:8px";
     drop.textContent = "Arraste vídeos e imagens aqui, ou clique para selecionar";
     card.appendChild(drop);
+
+    // Barra "ou cole URL do YouTube" — baixa direto na pasta deste PROD_N e
+    // adiciona o arquivo final na lista do card.
+    var ytWrap = document.createElement("div");
+    ytWrap.style.cssText = "display:flex;gap:6px;margin-bottom:8px";
+    var ytIn = document.createElement("input");
+    ytIn.type = "text";
+    ytIn.placeholder = "...ou cole URL do YouTube";
+    ytIn.style.cssText = "flex:1;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px";
+    var ytBtn = document.createElement("button");
+    ytBtn.textContent = "Baixar";
+    ytBtn.style.cssText = "min-width:80px";
+    ytWrap.appendChild(ytIn);
+    ytWrap.appendChild(ytBtn);
+    card.appendChild(ytWrap);
+
+    ytBtn.addEventListener("click", function () {
+        var url = (ytIn.value || "").trim();
+        if (!url) { recLog("Cole uma URL do YouTube primeiro.", "warn"); return; }
+        ytBtn.disabled = true; ytIn.disabled = true;
+        var originalLabel = ytBtn.textContent;
+        ytBtn.textContent = "Baixando…";
+        downloadYTToFolder(n, url,
+            function onProgress(label) { ytBtn.textContent = label; },
+            function onDone(err, filePath) {
+                ytBtn.disabled = false; ytIn.disabled = false;
+                ytBtn.textContent = originalLabel;
+                if (err) { recLog("✗ " + err.message, "err"); return; }
+                ytIn.value = "";
+                addPaths([filePath]); // entra na lista do card como qualquer outro arquivo
+            }
+        );
+    });
+    ytIn.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); ytBtn.click(); }
+    });
 
     var listEl = document.createElement("div");
     listEl.style.cssText = "font-family:monospace;font-size:11px;margin-bottom:8px";
@@ -393,7 +636,7 @@ function renderProductCard(n) {
     actions.className = "row-space";
     var createBtn = document.createElement("button");
     createBtn.className = "btn-primary flex1";
-    createBtn.textContent = "Criar PROD_" + n;
+    createBtn.textContent = "Criar PRODUTO " + n;
     createBtn.disabled = true;
     var cancelBtn = document.createElement("button");
     cancelBtn.className = "flex1";
@@ -508,22 +751,22 @@ function renderProductCard(n) {
         var arg = JSON.stringify(n) + "," +
                   JSON.stringify(JSON.stringify(paths)) + "," +
                   JSON.stringify(refPath || "");
-        recLog("Criando bin PROD_" + n + " com " + paths.length + " arquivo(s)…");
+        recLog("Criando PRODUTO " + n + " com " + paths.length + " arquivo(s)…");
         cs.evalScript("addProductMedia(" + arg + ")", function (raw) {
             var r = {};
             try { r = JSON.parse(raw); } catch (e) {}
             if (r && r.ok) {
-                var msg = "✓ PROD_" + n + " criado — " + r.imported + " importado(s)";
+                var msg = "✓ PRODUTO " + n + " criado — " + r.imported + " importado(s)";
                 if (r.failed && r.failed.length) msg += ", " + r.failed.length + " falhou";
                 msg += " | referência: " + r.ref;
                 recLog(msg, "ok");
                 drop.style.display = "none";
                 listEl.style.opacity = "0.6";
-                title.textContent = "✓ PROD_" + n + " (criado)";
+                title.textContent = "✓ PRODUTO " + n + " (criado)";
                 createBtn.style.display = "none";
                 cancelBtn.style.display = "none";
             } else {
-                recLog("✗ Erro ao criar PROD_" + n + ": " + (r.error || raw), "err");
+                recLog("✗ Erro ao criar PRODUTO " + n + ": " + (r.error || raw), "err");
                 createBtn.disabled = false; cancelBtn.disabled = false;
             }
             releaseAddBtn();
@@ -556,6 +799,8 @@ function createTemplateSequencesAction() {
             recLog("✗ Erro: " + (r.error || raw), "err");
         }
         if (btn) btn.disabled = false;
+        // Re-checa as faltantes — se acabaram, a seção some sozinha.
+        refreshTemplateSeqSection();
     });
 }
 

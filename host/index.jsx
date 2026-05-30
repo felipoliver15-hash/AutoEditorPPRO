@@ -4863,6 +4863,48 @@ function createTemplateSequences(namesJSON) {
     } catch (e) { return JSON.stringify({ error: e.message }); }
 }
 
+// Recebe uma lista de nomes de template (ex: ["[TEMPLATE]PRODUTO", ...]) e
+// devolve quais já existem como Sequence no projeto e quais faltam. Usado pra
+// mostrar/esconder o botão "Criar Sequências de Template" na aba Recursos.
+function checkTemplateSequences(namesJSON) {
+    try {
+        var names = JSON.parse(namesJSON);
+        var existing = [], missing = [];
+        for (var i = 0; i < names.length; i++) {
+            if (_seqExists(names[i])) existing.push(names[i]);
+            else missing.push(names[i]);
+        }
+        return JSON.stringify({ existing: existing, missing: missing });
+    } catch (e) { return JSON.stringify({ existing: [], missing: [], error: e.message }); }
+}
+
+// Lista os bins PROD_<n> existentes no root do projeto (ordenado) + o próximo
+// número livre. Usado pelo dropdown "Baixar do YouTube".
+function listProductBins() {
+    try {
+        var root = app.project.rootItem;
+        var arr = [];
+        for (var i = 0; i < root.children.numItems; i++) {
+            var nm = String(root.children[i].name || "");
+            var m = nm.match(/^PROD_(\d+)$/i);
+            if (m) arr.push(parseInt(m[1], 10));
+        }
+        arr.sort(function (a, b) { return a - b; });
+        var next = arr.length ? arr[arr.length - 1] + 1 : 1;
+        return JSON.stringify({ existing: arr, next: next });
+    } catch (e) { return JSON.stringify({ existing: [], next: 1, error: e.message }); }
+}
+
+// Diretório raiz da extensão (pra resolver caminho do bin/yt-dlp.exe embutido).
+// Deriva de $.fileName (= caminho do index.jsx rodando), 2 níveis acima.
+function getExtensionDir() {
+    try {
+        var hostFile = new File($.fileName);
+        var root = hostFile.parent.parent; // host/index.jsx → host/ → raiz
+        return JSON.stringify({ dir: root.fsName });
+    } catch (e) { return JSON.stringify({ dir: "", error: e.message }); }
+}
+
 // Acha um clip na timeline cujo nome contém nameSub e que começa perto de startSec.
 // Procura em todas as video tracks (evita confusão de índice de track).
 function findClipByNameNearStart(seq, nameSub, startSec, tolSec) {
