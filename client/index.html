@@ -7,6 +7,15 @@
 </head>
 <body>
 
+  <!-- Banner de atualização do PLUGIN (aparece SÓ quando há update no GitHub). -->
+  <div id="plugin-update-bar" style="display:none; background:#2b5d9b; color:#fff; padding:8px 12px; border-bottom:1px solid #1a3d6b; font-size:12px;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span id="plugin-update-msg" style="flex:1;">Atualização disponível</span>
+      <button id="btn-plugin-update" style="background:#fff; color:#234; font-weight:bold; padding:4px 10px; border:none; border-radius:3px; cursor:pointer;">Atualizar Agora</button>
+      <button id="btn-plugin-update-dismiss" title="Dispensar até reabrir o painel" style="background:transparent; color:#fff; border:1px solid #fff5; padding:4px 8px; border-radius:3px; cursor:pointer;">✕</button>
+    </div>
+  </div>
+
   <div class="tabs">
     <button class="tab active" data-tab="montar">Montar</button>
     <button class="tab" data-tab="ia" style="display:none">IA</button>
@@ -184,6 +193,13 @@
       <div class="row-space">
         <span id="ytdlp-update-msg" class="hint flex1">Atualização do yt-dlp disponível</span>
         <button id="btn-ytdlp-update">Atualizar yt-dlp</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="row-space">
+        <span class="hint flex1">Atualizações do plugin (GitHub)</span>
+        <button id="btn-plugin-check">Verificar Updates Agora</button>
       </div>
     </div>
 

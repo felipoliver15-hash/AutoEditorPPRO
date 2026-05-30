@@ -21,6 +21,7 @@ document.addEventListener("DOMContentLoaded", function () {
     initCapitulos();
     refreshSequenceInfo();
     initProjectPersistence();
+    initPluginUpdate();
 });
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────
@@ -459,6 +460,214 @@ function updateYtDlpAction() {
         }
         if (btn) { btn.disabled = false; btn.textContent = "Atualizar yt-dlp"; }
     });
+}
+
+// ─── AUTO-UPDATE DO PLUGIN (GitHub) ───────────────────────────────────────────
+// Sistema de atualização inteligente: na abertura do painel, consulta a GitHub
+// API e baixa SÓ os arquivos modificados desde a versão local. Banner azul no
+// topo do painel avisa quando há update. Pré-requisito: repo deve ser PÚBLICO
+// (não usa autenticação). Versão local armazenada em <extDir>/version.txt.
+
+var UPDATE_REPO_OWNER = "felipoliver15-hash";
+var UPDATE_REPO_NAME  = "AutoEditorPPRO";
+var UPDATE_BRANCH     = "main";
+var _pendingPluginUpdate = null;
+
+function _versionFilePath() {
+    var pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    if (!pmod || !extDir) return null;
+    return pmod.join(extDir, "version.txt");
+}
+function _readLocalVersion() {
+    var fs = tryNodeRequire('fs');
+    var p = _versionFilePath();
+    if (!fs || !p) return null;
+    try { if (fs.existsSync(p)) return String(fs.readFileSync(p, 'utf8') || "").trim(); } catch (e) {}
+    return null;
+}
+function _writeLocalVersion(sha) {
+    var fs = tryNodeRequire('fs');
+    var p = _versionFilePath();
+    if (!fs || !p) return false;
+    try { fs.writeFileSync(p, String(sha), 'utf8'); return true; } catch (e) { return false; }
+}
+
+// HTTPS GET genérico com suporte a redirect e cabeçalho User-Agent (GitHub exige).
+function _httpsGet(url, asBinary, cb, _depth) {
+    if (_depth === undefined) _depth = 0;
+    if (_depth > 5) { cb(new Error("muitos redirects")); return; }
+    var https = tryNodeRequire('https');
+    if (!https) { cb(new Error("https indisponível")); return; }
+    var m = url.match(/^https?:\/\/([^\/]+)(\/.*)?$/);
+    if (!m) { cb(new Error("URL inválida: " + url)); return; }
+    var hostname = m[1], path = m[2] || "/";
+    var headers = { "User-Agent": "AutoEditorPPRO" };
+    if (!asBinary) headers["Accept"] = "application/vnd.github+json";
+    var req;
+    try {
+        req = https.request({ hostname: hostname, path: path, method: "GET", headers: headers }, function (res) {
+            if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) && res.headers.location) {
+                return _httpsGet(res.headers.location, asBinary, cb, _depth + 1);
+            }
+            if (res.statusCode >= 400) {
+                cb(new Error("HTTP " + res.statusCode + " " + url));
+                return;
+            }
+            if (asBinary) {
+                var chunks = [];
+                res.on("data", function (d) { chunks.push(d); });
+                res.on("end", function () { cb(null, Buffer.concat(chunks)); });
+            } else {
+                var data = "";
+                res.on("data", function (d) { data += d.toString(); });
+                res.on("end", function () {
+                    try { cb(null, JSON.parse(data)); } catch (e) { cb(new Error("JSON inválido: " + e.message + " — " + data.substring(0, 100))); }
+                });
+            }
+        });
+        req.on("error", function (e) { cb(e); });
+        req.end();
+    } catch (e) { cb(e); }
+}
+
+// Checa updates. Se verbose=true, loga feedback em rec-log (botão manual).
+// Se verbose=false, silencioso (auto-check na inicialização).
+function checkPluginUpdate(verbose) {
+    var bar = document.getElementById("plugin-update-bar");
+    if (!bar) return;
+    bar.style.display = "none";
+    var fs = tryNodeRequire('fs'); var pmod = tryNodeRequire('path');
+    if (!fs || !pmod) {
+        if (verbose) recLog("Node indisponível — sem como verificar.", "err");
+        return;
+    }
+    if (verbose) recLog("Verificando atualizações do plugin no GitHub…");
+    var apiUrl = "https://api.github.com/repos/" + UPDATE_REPO_OWNER + "/" + UPDATE_REPO_NAME + "/commits/" + UPDATE_BRANCH;
+    _httpsGet(apiUrl, false, function (err, data) {
+        if (err || !data || !data.sha) {
+            if (verbose) recLog("✗ Erro ao verificar: " + (err ? err.message : "resposta inválida"), "err");
+            return;
+        }
+        var remoteSha = data.sha;
+        var short = remoteSha.substring(0, 7);
+        var local = _readLocalVersion();
+        if (!local) {
+            // Primeira execução: assume install = última versão e salva o SHA.
+            _writeLocalVersion(remoteSha);
+            if (verbose) recLog("✓ Versão atual definida como " + short + " (primeira verificação).", "ok");
+            return;
+        }
+        if (local === remoteSha) {
+            if (verbose) recLog("✓ Plugin atualizado (commit " + short + ")", "ok");
+            return;
+        }
+        // Pega lista de arquivos modificados entre local e remoto.
+        var cmpUrl = "https://api.github.com/repos/" + UPDATE_REPO_OWNER + "/" + UPDATE_REPO_NAME + "/compare/" + local + "..." + remoteSha;
+        _httpsGet(cmpUrl, false, function (err2, cmp) {
+            if (err2) {
+                _pendingPluginUpdate = { localSha: local, remoteSha: remoteSha, files: [], full: true };
+                _showUpdateBanner("Versão local antiga não pôde ser comparada — recomenda-se reinstalar.");
+                if (verbose) recLog("⚠ Versão local não pôde ser comparada — talvez force-push? Reinstale.", "warn");
+                return;
+            }
+            var files = cmp && cmp.files ? cmp.files : [];
+            if (!files.length) {
+                _writeLocalVersion(remoteSha);
+                if (verbose) recLog("✓ Plugin atualizado (commit " + short + ")", "ok");
+                return;
+            }
+            _pendingPluginUpdate = { localSha: local, remoteSha: remoteSha, files: files, full: false };
+            var subj = (data.commit && data.commit.message ? data.commit.message.split("\n")[0] : "").substring(0, 60);
+            _showUpdateBanner("Atualização disponível: " + files.length + " arquivo(s) — " + subj);
+            if (verbose) recLog("⚠ Update disponível: " + files.length + " arquivo(s) (" + local.substring(0, 7) + " → " + short + ") — banner azul no topo do painel.", "warn");
+        });
+    });
+}
+
+function _showUpdateBanner(msg) {
+    var bar = document.getElementById("plugin-update-bar");
+    var msgEl = document.getElementById("plugin-update-msg");
+    if (!bar) return;
+    if (msgEl) msgEl.textContent = msg;
+    bar.style.display = "";
+}
+
+// Aplica o update: baixa cada arquivo modificado via raw.githubusercontent.com
+// e escreve em AppData. Atualiza version.txt no final.
+function applyPluginUpdate() {
+    if (!_pendingPluginUpdate) return;
+    var info = _pendingPluginUpdate;
+    if (info.full) {
+        _setUpdateMsg("Reinstale manualmente (run install.bat após git pull).");
+        return;
+    }
+    var fs = tryNodeRequire('fs'); var pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    if (!fs || !pmod || !extDir) { _setUpdateMsg("Erro: Node/extensão indisponível."); return; }
+
+    var btn = document.getElementById("btn-plugin-update");
+    if (btn) btn.disabled = true;
+
+    var total = info.files.length, errors = 0;
+    function step(i) {
+        if (i >= total) {
+            if (errors === 0) {
+                _writeLocalVersion(info.remoteSha);
+                _setUpdateMsg("✓ Atualizado! Feche e reabra o painel pra aplicar.");
+            } else {
+                _setUpdateMsg("⚠ Update parcial: " + errors + " falha(s). Feche e reabra mesmo assim.");
+            }
+            if (btn) btn.style.display = "none";
+            return;
+        }
+        var f = info.files[i];
+        _setUpdateMsg("Atualizando " + (i + 1) + "/" + total + ": " + f.filename);
+        var destPath = pmod.join(extDir, f.filename.replace(/\//g, pmod.sep));
+
+        if (f.status === "removed") {
+            try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); }
+            catch (eDel) { errors++; }
+            return step(i + 1);
+        }
+        if (f.status === "renamed" && f.previous_filename) {
+            // Apaga o antigo e baixa o novo
+            try {
+                var oldPath = pmod.join(extDir, f.previous_filename.replace(/\//g, pmod.sep));
+                if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+            } catch (eOld) {}
+        }
+        var rawUrl = "https://raw.githubusercontent.com/" + UPDATE_REPO_OWNER + "/" + UPDATE_REPO_NAME + "/" + info.remoteSha + "/" + f.filename;
+        _httpsGet(rawUrl, true, function (err, buf) {
+            if (err) { errors++; return step(i + 1); }
+            try {
+                fs.mkdirSync(pmod.dirname(destPath), { recursive: true });
+                fs.writeFileSync(destPath, buf);
+            } catch (eW) { errors++; }
+            step(i + 1);
+        });
+    }
+    step(0);
+}
+
+function _setUpdateMsg(msg) {
+    var el = document.getElementById("plugin-update-msg");
+    if (el) el.textContent = msg;
+}
+
+function initPluginUpdate() {
+    var btn = document.getElementById("btn-plugin-update");
+    if (btn) btn.addEventListener("click", applyPluginUpdate);
+    var dis = document.getElementById("btn-plugin-update-dismiss");
+    if (dis) dis.addEventListener("click", function () {
+        var bar = document.getElementById("plugin-update-bar");
+        if (bar) bar.style.display = "none";
+    });
+    // Botão "Verificar Updates Agora" (manual) — feedback explícito no rec-log.
+    var checkBtn = document.getElementById("btn-plugin-check");
+    if (checkBtn) checkBtn.addEventListener("click", function () { checkPluginUpdate(true); });
+    // Auto-check silencioso na abertura do painel.
+    setTimeout(function () { checkPluginUpdate(false); }, 1500);
 }
 
 // Mostra a seção "Sequências de template" SÓ se houver alguma faltando.
