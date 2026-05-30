@@ -33,7 +33,7 @@ function initTabs() {
             btn.classList.add("active");
             document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
             if (btn.dataset.tab === "templates") refreshTemplates();
-            if (btn.dataset.tab === "recursos")  refreshTemplateSeqSection();
+            if (btn.dataset.tab === "recursos") { refreshTemplateSeqSection(); checkYtDlpUpdate(); }
         });
     });
 }
@@ -362,6 +362,103 @@ function initRecursos() {
     if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
     refreshTemplateSeqSection();
 
+    var updBtn = document.getElementById("btn-ytdlp-update");
+    if (updBtn) updBtn.addEventListener("click", updateYtDlpAction);
+    checkYtDlpUpdate();
+}
+
+// Verifica se há atualização do yt-dlp comparando a versão embutida com a
+// release mais recente do canal nightly. Mostra a barra de update SÓ se houver
+// diferença (= update real disponível).
+function checkYtDlpUpdate() {
+    var bar = document.getElementById("ytdlp-update-bar");
+    var msg = document.getElementById("ytdlp-update-msg");
+    if (!bar) return;
+    bar.style.display = "none"; // padrão: escondida (mostra só se confirmar update)
+    var extDir = getExtensionRootClient();
+    var fs    = tryNodeRequire('fs');
+    var pmod  = tryNodeRequire('path');
+    var cp    = tryNodeRequire('child_process');
+    var https = tryNodeRequire('https');
+    if (!extDir || !fs || !pmod || !cp || !https) return;
+    var ytdlp = pmod.join(extDir, "bin", "yt-dlp.exe");
+    if (!fs.existsSync(ytdlp)) return;
+
+    // 1) Versão local
+    var bv = "";
+    var localProc;
+    try { localProc = cp.spawn(ytdlp, ["--version"], { windowsHide: true }); }
+    catch (e) { return; }
+    localProc.stdout.on("data", function (d) { bv += d.toString(); });
+    localProc.on("error", function () {});
+    localProc.on("close", function () {
+        var bundled = (bv || "").trim();
+        if (!bundled) return;
+        // 2) Última versão do canal nightly via GitHub API
+        var req;
+        try {
+            req = https.request({
+                hostname: "api.github.com",
+                path: "/repos/yt-dlp/yt-dlp-nightly-builds/releases/latest",
+                method: "GET",
+                headers: { "User-Agent": "AutoEditorPPRO" }
+            }, function (res) {
+                var data = "";
+                res.on("data", function (d) { data += d.toString(); });
+                res.on("end", function () {
+                    try {
+                        var r = JSON.parse(data);
+                        var latest = String(r.tag_name || "").trim();
+                        if (latest && latest !== bundled) {
+                            if (msg) msg.textContent = "Atualização do yt-dlp disponível: " + bundled + " → " + latest;
+                            bar.style.display = "";
+                        }
+                    } catch (e) {}
+                });
+            });
+            req.on("error", function () {});
+            req.end();
+        } catch (e2) {}
+    });
+}
+
+function updateYtDlpAction() {
+    var bar = document.getElementById("ytdlp-update-bar");
+    var btn = document.getElementById("btn-ytdlp-update");
+    var extDir = getExtensionRootClient();
+    var pmod   = tryNodeRequire('path');
+    var cp     = tryNodeRequire('child_process');
+    if (!extDir || !pmod || !cp) { recLog("Node indisponível pra atualizar.", "err"); return; }
+    var ytdlp = pmod.join(extDir, "bin", "yt-dlp.exe");
+    if (btn) { btn.disabled = true; btn.textContent = "Atualizando…"; }
+    recLog("Atualizando yt-dlp (canal nightly)…");
+    var ch;
+    try { ch = cp.spawn(ytdlp, ["-U", "--update-to", "nightly"], { windowsHide: true }); }
+    catch (e) {
+        recLog("✗ Falha ao iniciar update: " + e.message, "err");
+        if (btn) { btn.disabled = false; btn.textContent = "Atualizar yt-dlp"; }
+        return;
+    }
+    ch.stdout.on("data", function (d) {
+        String(d).split(/\r?\n/).forEach(function (l) { if (l.trim()) recLog("  " + l.trim()); });
+    });
+    ch.stderr.on("data", function (d) {
+        String(d).split(/\r?\n/).forEach(function (l) { if (l.trim()) recLog("  " + l.trim(), "warn"); });
+    });
+    ch.on("error", function (e) {
+        recLog("✗ Erro: " + e.message, "err");
+        if (btn) { btn.disabled = false; btn.textContent = "Atualizar yt-dlp"; }
+    });
+    ch.on("close", function (code) {
+        if (code === 0) {
+            recLog("✓ yt-dlp atualizado.", "ok");
+            // Re-checa: se realmente atualizou, a barra some sozinha.
+            setTimeout(checkYtDlpUpdate, 500);
+        } else {
+            recLog("✗ Update encerrou com código " + code, "err");
+        }
+        if (btn) { btn.disabled = false; btn.textContent = "Atualizar yt-dlp"; }
+    });
 }
 
 // Mostra a seção "Sequências de template" SÓ se houver alguma faltando.
@@ -440,7 +537,7 @@ function detectFfmpeg(cb) {
 // onProgress(text) é chamado durante o download (texto pra UI da barra).
 // Usado pela barrinha "Baixar do YouTube" dentro do card de Adicionar Produto.
 function downloadYTToFolder(folder, url, onProgress, onDone) {
-    if (!url) { onDone(new Error("Cole uma URL do YouTube primeiro.")); return; }
+    if (!url) { onDone(new Error("Cole uma URL primeiro.")); return; }
     var extDir = getExtensionRootClient();
     cs.evalScript("getProjectDir()", function (rawPrj) {
         var prjDir = "";
@@ -466,6 +563,18 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
     try { fs.mkdirSync(outDir, { recursive: true }); }
     catch (e) { fail("Erro criando pasta '" + outDir + "': " + e.message); return; }
 
+    // Limpa arquivos órfãos de execuções anteriores (manifests HLS, .part etc).
+    // Se ficar um .m3u8 antigo de um download falho, o yt-dlp tenta usá-lo como
+    // input do postprocessor e quebra com "Invalid data found when processing
+    // input". Removê-los antes do download evita esse falso-erro.
+    try {
+        fs.readdirSync(outDir).forEach(function (n) {
+            if (/\.(m3u8|part|ytdl|temp)$/i.test(n)) {
+                try { fs.unlinkSync(pmod.join(outDir, n)); recLog("  limpando órfão: " + n); } catch (e) {}
+            }
+        });
+    } catch (e) {}
+
     var bundled = extDir ? pmod.join(extDir, "bin", "yt-dlp.exe") : "";
     var hasBundled = false;
     try { hasBundled = !!(bundled && fs.existsSync(bundled)); } catch (e) {}
@@ -479,7 +588,16 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
         if (ff.ok) {
             recLog("ffmpeg: " + (ff.dir ? "embutido" : "PATH") + " — qualidade alta (merge vídeo+áudio).");
             formatSel = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
-            extraArgs = ["--merge-output-format", "mp4"];
+            extraArgs = [
+                "--merge-output-format", "mp4",
+                // Amazon (e vários outros) servem HLS num único format com codec
+                // "unknown" — remux pra mp4 + downloader ffmpeg pra HLS faz a
+                // mágica funcionar sem quebrar YouTube (que continua usando o
+                // downloader nativo pra DASH).
+                "--remux-video", "mp4",
+                "--downloader", "m3u8:ffmpeg",
+                "--hls-use-mpegts"
+            ];
             if (ff.dir) extraArgs.push("--ffmpeg-location", ff.dir);
         } else {
             recLog("⚠ ffmpeg não encontrado — caindo pra MP4 progressivo (~360p no YouTube novo).", "warn");
@@ -487,7 +605,12 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
         }
 
         var args = ["-f", formatSel].concat(extraArgs).concat([
-            "--no-playlist", "--restrict-filenames", "--no-warnings",
+            // --playlist-items 1 (no lugar de --no-playlist) limita a 1 vídeo
+            // por URL E não confunde o extractor da Amazon (que trata cada
+            // produto como playlist de 1 item — --no-playlist faz ele falhar).
+            "--playlist-items", "1",
+            "--restrict-filenames", "--no-warnings",
+            "--force-overwrites",
             "-o", pmod.join(outDir, "%(title)s.%(ext)s"),
             "--print", "after_move:%(filepath)s",
             url
@@ -523,10 +646,26 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             }
         }
         var outSink = { buf: "" }, errSink = { buf: "" };
+        // Janela de tempo válida pra detectar o arquivo final: o fallback de
+        // "pega o arquivo mais novo da pasta" SÓ pode considerar arquivos cuja
+        // mtime caia depois deste momento (com 2s de folga). Senão ele pega
+        // arquivos antigos da pasta (ex: vídeo de outro download) e mente
+        // sucesso falsamente.
+        var runStartMs = Date.now() - 2000;
+
+        // Força UTF-8 na stdout do yt-dlp (que é Python). Em Windows BR a stdout
+        // default é cp1252 — sem isso, paths com acentos chegam aqui como bytes
+        // 0xE9 etc., o Node decodifica errado, e o regex de captura do
+        // --print after_move:%(filepath)s não bate. Resultado antes do fix:
+        // o fallback "arquivo mais novo" era usado quase sempre.
+        var spawnEnv = {};
+        try { Object.keys(process.env || {}).forEach(function (k) { spawnEnv[k] = process.env[k]; }); } catch (eEnv) {}
+        spawnEnv.PYTHONIOENCODING = "utf-8";
 
         var ch;
-        try { ch = cp.spawn(ytdlp, args, { windowsHide: true }); }
+        try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv }); }
         catch (eSp) { fail("Falha ao iniciar yt-dlp: " + eSp.message); return; }
+        try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (eEnc) {}
         ch.stdout.on("data", function (d) { drain(d, outSink); });
         ch.stderr.on("data", function (d) { drain(d, errSink); });
         ch.on("error", function (e) { fail("Erro yt-dlp: " + e.message); });
@@ -540,12 +679,19 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
                         var p = pmod.join(outDir, n);
                         var st = fs.statSync(p);
                         return { p: p, m: st.mtimeMs, isFile: st.isFile() };
-                    }).filter(function (e) { return e.isFile && /\.(mp4|mkv|webm|m4a)$/i.test(e.p); });
+                    }).filter(function (e) {
+                        return e.isFile
+                            && e.m >= runStartMs   // SÓ arquivos modificados nesta execução
+                            && /\.(mp4|mkv|webm|m4a)$/i.test(e.p);
+                    });
                     entries.sort(function (a, b) { return b.m - a.m; });
-                    if (entries.length) ytFinalPath = entries[0].p;
+                    if (entries.length) {
+                        ytFinalPath = entries[0].p;
+                        recLog("⚠ Caminho final não veio via --print, usando o mais novo na pasta: " + ytFinalPath, "warn");
+                    }
                 } catch (eF) {}
             }
-            if (!ytFinalPath) { fail("Download terminou mas não localizei o arquivo final."); return; }
+            if (!ytFinalPath) { fail("Download terminou (exit 0) mas nenhum arquivo novo foi criado — provavelmente o extractor falhou silenciosamente."); return; }
             recLog("✓ Baixado: " + ytFinalPath, "ok");
             onDone(null, ytFinalPath);
         });
@@ -579,71 +725,60 @@ function renderProductCard(n) {
     var card = document.createElement("div");
     card.style.cssText = "border:1px solid #444;border-radius:6px;padding:10px;margin-top:10px;background:#2a2a2a";
 
-    var files = [];      // {path, name, isImage}
-    var refPath = null;  // imagem marcada como referência (png)
+    var files = [];         // staged files (não-importados ainda) — pré OU adicionando mais
+    var refPath = null;     // imagem marcada como referência (png), só pré-criação
+    var _isCreated = false; // PRODUTO já existe no Premiere
+    var _isExpanded = true; // staging visível (drop/url/list/botões)
 
     var title = document.createElement("div");
     title.style.cssText = "font-weight:bold;margin-bottom:6px";
     title.textContent = "PRODUTO " + n;
     card.appendChild(title);
 
+    // === Staging (expanded) ===
+    var expandedView = document.createElement("div");
+    card.appendChild(expandedView);
+
     var drop = document.createElement("div");
     drop.style.cssText = "border:2px dashed #555;border-radius:6px;padding:14px;text-align:center;color:#999;cursor:pointer;margin-bottom:8px";
     drop.textContent = "Arraste vídeos e imagens aqui, ou clique para selecionar";
-    card.appendChild(drop);
+    expandedView.appendChild(drop);
 
-    // Barra "ou cole URL do YouTube" — baixa direto na pasta deste PROD_N e
-    // adiciona o arquivo final na lista do card.
     var ytWrap = document.createElement("div");
     ytWrap.style.cssText = "display:flex;gap:6px;margin-bottom:8px";
     var ytIn = document.createElement("input");
     ytIn.type = "text";
-    ytIn.placeholder = "...ou cole URL do YouTube";
+    ytIn.placeholder = "...ou cole URL (YouTube, Amazon, etc)";
     ytIn.style.cssText = "flex:1;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px";
     var ytBtn = document.createElement("button");
     ytBtn.textContent = "Baixar";
     ytBtn.style.cssText = "min-width:80px";
     ytWrap.appendChild(ytIn);
     ytWrap.appendChild(ytBtn);
-    card.appendChild(ytWrap);
-
-    ytBtn.addEventListener("click", function () {
-        var url = (ytIn.value || "").trim();
-        if (!url) { recLog("Cole uma URL do YouTube primeiro.", "warn"); return; }
-        ytBtn.disabled = true; ytIn.disabled = true;
-        var originalLabel = ytBtn.textContent;
-        ytBtn.textContent = "Baixando…";
-        downloadYTToFolder(n, url,
-            function onProgress(label) { ytBtn.textContent = label; },
-            function onDone(err, filePath) {
-                ytBtn.disabled = false; ytIn.disabled = false;
-                ytBtn.textContent = originalLabel;
-                if (err) { recLog("✗ " + err.message, "err"); return; }
-                ytIn.value = "";
-                addPaths([filePath]); // entra na lista do card como qualquer outro arquivo
-            }
-        );
-    });
-    ytIn.addEventListener("keydown", function (e) {
-        if (e.key === "Enter") { e.preventDefault(); ytBtn.click(); }
-    });
+    expandedView.appendChild(ytWrap);
 
     var listEl = document.createElement("div");
     listEl.style.cssText = "font-family:monospace;font-size:11px;margin-bottom:8px";
-    card.appendChild(listEl);
+    expandedView.appendChild(listEl);
 
     var actions = document.createElement("div");
     actions.className = "row-space";
-    var createBtn = document.createElement("button");
-    createBtn.className = "btn-primary flex1";
-    createBtn.textContent = "Criar PRODUTO " + n;
-    createBtn.disabled = true;
+    var submitBtn = document.createElement("button");
+    submitBtn.className = "btn-primary flex1";
+    submitBtn.textContent = "Criar PRODUTO " + n;
+    submitBtn.disabled = true;
     var cancelBtn = document.createElement("button");
     cancelBtn.className = "flex1";
     cancelBtn.textContent = "Cancelar";
-    actions.appendChild(createBtn);
+    actions.appendChild(submitBtn);
     actions.appendChild(cancelBtn);
-    card.appendChild(actions);
+    expandedView.appendChild(actions);
+
+    // === Collapsed (só pós-criação): botão "+ ARQUIVO" no final do card ===
+    var collapsedAddBtn = document.createElement("button");
+    collapsedAddBtn.textContent = "+ ARQUIVO";
+    collapsedAddBtn.style.cssText = "display:none;width:100%;margin-top:2px";
+    card.appendChild(collapsedAddBtn);
 
     container.appendChild(card);
     _pendingProductCard = card;
@@ -654,15 +789,37 @@ function renderProductCard(n) {
         if (addBtn) addBtn.disabled = false;
     }
 
+    function setCollapsed(collapsed) {
+        _isExpanded = !collapsed;
+        expandedView.style.display = collapsed ? "none" : "";
+        collapsedAddBtn.style.display = (collapsed && _isCreated) ? "" : "none";
+    }
+
+    // Abre o staging pra adicionar mais arquivos a um PRODUTO já criado.
+    function expandForAddMore() {
+        files = [];
+        refPath = null;
+        submitBtn.textContent = "Adicionar Arquivos";
+        submitBtn.disabled = true;
+        cancelBtn.disabled = false;
+        cancelBtn.style.display = "";
+        submitBtn.style.display = "";
+        renderList();
+        setCollapsed(false);
+    }
+
+    collapsedAddBtn.addEventListener("click", expandForAddMore);
+
     function renderList() {
         listEl.innerHTML = "";
         if (!files.length) {
             listEl.innerHTML = "<span style='color:#777'>nenhum arquivo adicionado</span>";
-            createBtn.disabled = true;
+            submitBtn.disabled = true;
             return;
         }
-        // garante uma referência válida (1ª imagem, se houver)
-        if (!refPath || !files.some(function (f) { return f.path === refPath; })) {
+        // Referência (png) só importa na criação INICIAL — adicionar mais arquivos
+        // NÃO mexe na ref existente no bin.
+        if (!_isCreated && (!refPath || !files.some(function (f) { return f.path === refPath; }))) {
             var firstImg = files.filter(function (f) { return f.isImage; })[0];
             refPath = firstImg ? firstImg.path : null;
         }
@@ -679,7 +836,8 @@ function renderProductCard(n) {
             nameSpan.textContent = f.name;
             row.appendChild(nameSpan);
 
-            if (f.isImage) {
+            // Radio ref (png) só na criação inicial.
+            if (!_isCreated && f.isImage) {
                 var lbl = document.createElement("label");
                 lbl.style.cssText = "font-size:10px;color:#9cf;cursor:pointer;white-space:nowrap";
                 var radio = document.createElement("input");
@@ -691,7 +849,7 @@ function renderProductCard(n) {
                 lbl.appendChild(document.createTextNode(" ref (png)"));
                 row.appendChild(lbl);
             }
-
+            // Botão remover staged (pré-import).
             var rm = document.createElement("button");
             rm.textContent = "✕";
             rm.style.cssText = "background:none;border:none;color:#c66;cursor:pointer";
@@ -703,7 +861,7 @@ function renderProductCard(n) {
 
             listEl.appendChild(row);
         });
-        createBtn.disabled = false;
+        submitBtn.disabled = false;
     }
 
     function addPaths(paths) {
@@ -739,37 +897,72 @@ function renderProductCard(n) {
         else recLog("Arrastar não retornou o caminho nesta versão — use o clique para selecionar.", "warn");
     });
 
-    cancelBtn.addEventListener("click", function () {
-        try { container.removeChild(card); } catch (e) {}
-        releaseAddBtn();
+    ytBtn.addEventListener("click", function () {
+        var url = (ytIn.value || "").trim();
+        if (!url) { recLog("Cole uma URL primeiro.", "warn"); return; }
+        ytBtn.disabled = true; ytIn.disabled = true;
+        var originalLabel = ytBtn.textContent;
+        ytBtn.textContent = "Baixando…";
+        downloadYTToFolder(n, url,
+            function onProgress(label) { ytBtn.textContent = label; },
+            function onDone(err, filePath) {
+                ytBtn.disabled = false; ytIn.disabled = false;
+                ytBtn.textContent = originalLabel;
+                if (err) { recLog("✗ " + err.message, "err"); return; }
+                ytIn.value = "";
+                addPaths([filePath]); // entra no staging — vai pro bin no submit
+            }
+        );
+    });
+    ytIn.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); ytBtn.click(); }
     });
 
-    createBtn.addEventListener("click", function () {
+    cancelBtn.addEventListener("click", function () {
+        if (_isCreated) {
+            // Add-more: descarta staging e fecha. PRODUTO segue existindo.
+            files = []; refPath = null;
+            setCollapsed(true);
+        } else {
+            // Criação inicial: descarta o card todo.
+            try { container.removeChild(card); } catch (e) {}
+            releaseAddBtn();
+        }
+    });
+
+    submitBtn.addEventListener("click", function () {
         if (!files.length) return;
-        createBtn.disabled = true; cancelBtn.disabled = true;
+        submitBtn.disabled = true; cancelBtn.disabled = true;
         var paths = files.map(function (f) { return f.path; });
+        // Em add-more: refPath = "" pra NÃO mexer na referência do bin existente.
+        var refArg = _isCreated ? "" : (refPath || "");
         var arg = JSON.stringify(n) + "," +
                   JSON.stringify(JSON.stringify(paths)) + "," +
-                  JSON.stringify(refPath || "");
-        recLog("Criando PRODUTO " + n + " com " + paths.length + " arquivo(s)…");
+                  JSON.stringify(refArg);
+        if (_isCreated) recLog("Adicionando " + paths.length + " arquivo(s) ao PRODUTO " + n + "…");
+        else            recLog("Criando PRODUTO " + n + " com " + paths.length + " arquivo(s)…");
         cs.evalScript("addProductMedia(" + arg + ")", function (raw) {
             var r = {};
             try { r = JSON.parse(raw); } catch (e) {}
             if (r && r.ok) {
-                var msg = "✓ PRODUTO " + n + " criado — " + r.imported + " importado(s)";
-                if (r.failed && r.failed.length) msg += ", " + r.failed.length + " falhou";
-                msg += " | referência: " + r.ref;
-                recLog(msg, "ok");
-                drop.style.display = "none";
-                listEl.style.opacity = "0.6";
-                title.textContent = "✓ PRODUTO " + n + " (criado)";
-                createBtn.style.display = "none";
-                cancelBtn.style.display = "none";
+                if (!_isCreated) {
+                    var msg = "✓ PRODUTO " + n + " criado — " + r.imported + " importado(s)";
+                    if (r.failed && r.failed.length) msg += ", " + r.failed.length + " falhou";
+                    msg += " | referência: " + r.ref;
+                    recLog(msg, "ok");
+                    _isCreated = true;
+                    title.textContent = "✓ PRODUTO " + n;
+                    releaseAddBtn(); // libera o "+ Adicionar Produto"
+                } else {
+                    recLog("✓ +" + r.imported + " arquivo(s) em PRODUTO " + n, "ok");
+                }
+                // Colapsa o card: só título + "+ ARQUIVO" no final.
+                files = []; refPath = null;
+                setCollapsed(true);
             } else {
-                recLog("✗ Erro ao criar PRODUTO " + n + ": " + (r.error || raw), "err");
-                createBtn.disabled = false; cancelBtn.disabled = false;
+                recLog("✗ Erro: " + (r.error || raw), "err");
+                submitBtn.disabled = false; cancelBtn.disabled = false;
             }
-            releaseAddBtn();
         });
     });
 
