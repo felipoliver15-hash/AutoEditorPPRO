@@ -1784,8 +1784,9 @@ function initProjectPersistence() {
 }
 
 function saveProjectData() {
+    // (campo "root-folder" foi removido na migração pro modelo de bins —
+    // não acessar mais ou dá null.value)
     var data = {
-        rootFolder:     document.getElementById("root-folder").value || "",
         transcriptPath: _savedTranscriptPath || "",
         jsonPath:       _savedJsonPath       || ""
     };
@@ -1966,34 +1967,43 @@ function openSRTPicker() {
 }
 
 function exportSRTFromPremiere() {
-    log("Exportando transcrição do Premiere...", "info");
     var btn = document.getElementById("btn-export-srt");
-    btn.disabled = true;
+    var statusEl = document.getElementById("srt-status");
+    log("Importando transcrição da sequência ativa…", "info");
+    if (btn) btn.disabled = true;
 
     cs.evalScript("getTempFolder()", function (raw) {
-        var tempFolder = raw.replace(/^"|"$/g, "").replace(/\\\\/g, "\\");
-        var srtPath    = tempFolder + "\\autoeditor_transcription.srt";
-        var escaped    = srtPath.replace(/\\/g, "\\\\");
+        var tempFolder = String(raw || "").replace(/^"|"$/g, "").replace(/\\\\/g, "\\");
+        if (!tempFolder) {
+            log("Não consegui resolver a pasta temporária.", "error");
+            if (btn) btn.disabled = false;
+            return;
+        }
+        var srtPath = tempFolder + "\\autoeditor_transcription.srt";
+        var escaped = srtPath.replace(/\\/g, "\\\\");
 
         cs.evalScript('exportTranscription("' + escaped + '")', function (result) {
-            btn.disabled = false;
-            try {
-                var data = JSON.parse(result);
-                if (data.error) {
-                    log(data.error, "error");
-                    document.getElementById("srt-status").textContent = "Falhou — carregue manualmente";
-                    document.getElementById("srt-status").className = "badge error";
-                } else {
-                    srtEntries = parseSRT(data.content);
-                    document.getElementById("srt-status").textContent = srtEntries.length + " entradas exportadas";
-                    document.getElementById("srt-status").className = "badge ok";
-                    log("Transcrição exportada: " + srtEntries.length + " entradas.", "ok");
-                    updateMountButton();
-                }
-            } catch (e) {
-                log("Erro ao processar transcrição: " + e.message, "error");
-                btn.disabled = false;
+            if (btn) btn.disabled = false;
+            var data = null;
+            try { data = JSON.parse(result); } catch (e) {
+                log("Resposta inválida do host: " + result, "error");
+                return;
             }
+            if (!data || data.error) {
+                log(data && data.error ? data.error : "Falha desconhecida.", "error");
+                if (data && data.attempts && data.attempts.length) {
+                    log("Tentativas: " + data.attempts.join(" | "), "info");
+                }
+                if (statusEl) {
+                    statusEl.textContent = "Falhou — veja log";
+                    statusEl.className = "badge error";
+                }
+                return;
+            }
+            // Sucesso: reusa o mesmo fluxo do "Carregar arquivo" pra
+            // manter status/estado consistente.
+            loadTranscriptContent(data.content, srtPath);
+            log("Transcrição importada da sequência (" + (data.hasCaptions ? "via captions" : "via fallback") + ").", "ok");
         });
     });
 }
@@ -3213,15 +3223,49 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                 if (item.template && item.template.toUpperCase().indexOf("PRODUTO") >= 0 && !produtoItem) produtoItem = item;
                 if (item.template && item.template.toUpperCase().indexOf("PRECO") >= 0) precoItem = item;
             });
-            if (!produtoItem || !precoItem) {
-                log("p" + (pIdx+1) + ": auto-fill ignorado (PRODUTO ou PRECO não encontrado/resolvido)", "warn");
+            if (!produtoItem) {
+                log("p" + (pIdx+1) + ": auto-fill ignorado (PRODUTO não encontrado/resolvido — sem ponto de início)", "warn");
                 return;
             }
 
             var produtoDur = durations[produtoItem.template] || 5;
             var fillStart  = produtoItem.time_seconds + produtoDur;
-            var fillEnd    = precoItem.time_seconds;
-            var fillDur    = fillEnd - fillStart;
+            var fillEnd;
+
+            if (precoItem) {
+                // Caso normal: tem PRECO → preenche até ele.
+                fillEnd = precoItem.time_seconds;
+            } else {
+                // PRECO faltando: estende até o INÍCIO do próximo produto.
+                // Pra o último produto sem PRECO: usa só os vídeos na duração
+                // natural (sem loop) — assume duração razoável.
+                var nextProdStart = null;
+                for (var npI = pIdx + 1; npI < mountProducts.length; npI++) {
+                    var npProd = mountProducts[npI];
+                    if (!npProd || !npProd.timeline) continue;
+                    for (var npJ = 0; npJ < npProd.timeline.length; npJ++) {
+                        var npIt = npProd.timeline[npJ];
+                        if (npIt.type === "template_insert" && npIt.template &&
+                            npIt.template.toUpperCase().indexOf("PRODUTO") >= 0 &&
+                            npIt.time_seconds !== undefined) {
+                            nextProdStart = npIt.time_seconds + (npIt.offset_seconds || 0);
+                            break;
+                        }
+                    }
+                    if (nextProdStart !== null) break;
+                }
+                if (nextProdStart !== null) {
+                    fillEnd = nextProdStart;
+                    log("p" + (pIdx+1) + ": PRECO não resolvido — fallback: preenchendo até o próximo produto (" + fillEnd.toFixed(1) + "s)", "warn");
+                } else {
+                    // Último produto sem PRECO: usa duração natural dos vídeos como aproximação.
+                    var natDur = (bm.videoTotal || 0) || 30; // fallback 30s se não tiver vídeo
+                    fillEnd = fillStart + natDur;
+                    log("p" + (pIdx+1) + ": PRECO não resolvido e é o último produto — usando duração natural dos vídeos (" + natDur.toFixed(1) + "s)", "warn");
+                }
+            }
+
+            var fillDur = fillEnd - fillStart;
             if (fillDur < 1) {
                 log("p" + (pIdx+1) + ": auto-fill pulado (gap muito pequeno: " + fillDur.toFixed(2) + "s)", "warn");
                 return;
@@ -3232,6 +3276,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
 
             // ── VÍDEOS DO BIN: entram PRIMEIRO, na duração natural (cortado no preço).
             var imgStart = fillStart;
+            var videoLooped = 0;
             if (bm.videos.length) {
                 var vcursor = fillStart, nVid = 0;
                 for (var vi = 0; vi < bm.videos.length; vi++) {
@@ -3248,8 +3293,32 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     });
                     vcursor += vdurFull; nVid++;
                 }
+
+                // SE NÃO HOUVER IMAGENS no bin e ainda sobrar gap, faz LOOP dos vídeos
+                // (cicla na lista repetindo o(s) mesmo(s) vídeo(s) — análogo ao loop
+                // de imagens em slots cíclicos).
+                if (bm.images.length === 0 && vcursor < fillEnd - 0.2) {
+                    var loopIdx = bm.videos.length;
+                    var safety  = bm.videos.length * 50;
+                    while (vcursor < fillEnd - 0.2 && safety-- > 0) {
+                        var lv = bm.videos[loopIdx % bm.videos.length];
+                        var lvdur = lv.dur || 0;
+                        if (!(lvdur > 0)) { loopIdx++; continue; }
+                        var thisDur = Math.min(lvdur, fillEnd - vcursor);
+                        addedItems.push({
+                            type: "product_video", bin_name: lv.name,
+                            time_seconds: vcursor, duration: thisDur, track: track, _autofill: true
+                        });
+                        vcursor += lvdur; loopIdx++; videoLooped++;
+                    }
+                }
+
                 imgStart = Math.min(vcursor, fillEnd);
-                log("p" + (pIdx+1) + ": " + nVid + " vídeo(s) do bin (" + bm.videoTotal.toFixed(1) + "s) — imagens preenchem de " + imgStart.toFixed(1) + "s a " + fillEnd.toFixed(1) + "s", "info");
+                if (videoLooped > 0) {
+                    log("p" + (pIdx+1) + ": " + nVid + " vídeo(s) + " + videoLooped + " repetição(ões) em loop (sem imagens no bin) — cobertura até " + fillEnd.toFixed(1) + "s", "info");
+                } else {
+                    log("p" + (pIdx+1) + ": " + nVid + " vídeo(s) do bin (" + bm.videoTotal.toFixed(1) + "s) — imagens preenchem de " + imgStart.toFixed(1) + "s a " + fillEnd.toFixed(1) + "s", "info");
+                }
             }
 
             // ── IMAGENS DO BIN: em loop, preenchendo o resto até o preço.
@@ -3267,8 +3336,9 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     _zoomPreset: (i % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
                 });
             }
-            if (imgFillDur > 0.2 && nImg < 1) {
-                log("p" + (pIdx+1) + ": vídeos terminaram em " + imgStart.toFixed(1) + "s mas o bin não tem imagens pra preencher até " + fillEnd.toFixed(1) + "s.", "warn");
+            // Warning final só se NEM vídeo (loop) NEM imagem conseguiu cobrir.
+            if (imgFillDur > 0.2 && nImg < 1 && videoLooped === 0) {
+                log("p" + (pIdx+1) + ": vídeos terminaram em " + imgStart.toFixed(1) + "s mas o bin não tem nada utilizável pra preencher até " + fillEnd.toFixed(1) + "s.", "warn");
             }
 
             prod.timeline = prod.timeline.concat(addedItems);
@@ -3303,7 +3373,10 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
         for (var pf = 0; pf < mountProducts.length - 1; pf++) {
             var prodA = mountProducts[pf];
             var bmA = binMedia[String(prodA.folder)];
-            if (!bmA || !bmA.images || bmA.images.length === 0) continue; // sem imagens no bin pra preencher
+            // Bin totalmente vazio (sem imagens E sem vídeos) → não tem como preencher.
+            if (!bmA ||
+                ((!bmA.images || bmA.images.length === 0) &&
+                 (!bmA.videos || bmA.videos.length === 0))) continue;
 
             var precoA = null;
             (prodA.timeline || []).forEach(function (it) {
@@ -3337,20 +3410,40 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             var gapPF       = nextStartPF - stretchEnd;
             if (gapPF < 0.5) continue; // PRECO cobre o gap todo
 
-            var nImgsA  = bmA.images.length;
             var trackA  = precoA.track || 1;
             var fillItems = [];
-            var nSlotsPF = Math.ceil(gapPF / slotDur);
-            for (var kf = 0; kf < nSlotsPF; kf++) {
-                var ft0 = stretchEnd + kf * slotDur;
-                var ft1 = Math.min(ft0 + slotDur, nextStartPF);
-                if (ft1 - ft0 < 0.2) break;
-                fillItems.push({
-                    type: "product_image", bin_name: bmA.images[kf % nImgsA].name,
-                    time_seconds: ft0, duration: ft1 - ft0, animation: "none",
-                    track: trackA, _autofill: true, _postpreco: true,
-                    _zoomPreset: (kf % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
-                });
+            if (bmA.images && bmA.images.length) {
+                // Caminho normal: loop de imagens em slots fixos.
+                var nImgsA  = bmA.images.length;
+                var nSlotsPF = Math.ceil(gapPF / slotDur);
+                for (var kf = 0; kf < nSlotsPF; kf++) {
+                    var ft0 = stretchEnd + kf * slotDur;
+                    var ft1 = Math.min(ft0 + slotDur, nextStartPF);
+                    if (ft1 - ft0 < 0.2) break;
+                    fillItems.push({
+                        type: "product_image", bin_name: bmA.images[kf % nImgsA].name,
+                        time_seconds: ft0, duration: ft1 - ft0, animation: "none",
+                        track: trackA, _autofill: true, _postpreco: true,
+                        _zoomPreset: (kf % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
+                    });
+                }
+            } else {
+                // Bin só tem vídeos — faz loop dos vídeos pra cobrir o gap.
+                var vcurPF = stretchEnd;
+                var loopIdxPF = 0;
+                var safetyPF = bmA.videos.length * 50;
+                while (vcurPF < nextStartPF - 0.2 && safetyPF-- > 0) {
+                    var pv = bmA.videos[loopIdxPF % bmA.videos.length];
+                    var pvdur = pv.dur || 0;
+                    if (!(pvdur > 0)) { loopIdxPF++; continue; }
+                    var thisDurPF = Math.min(pvdur, nextStartPF - vcurPF);
+                    fillItems.push({
+                        type: "product_video", bin_name: pv.name,
+                        time_seconds: vcurPF, duration: thisDurPF, track: trackA,
+                        _autofill: true, _postpreco: true
+                    });
+                    vcurPF += pvdur; loopIdxPF++;
+                }
             }
             if (fillItems.length) {
                 prodA.timeline = prodA.timeline.concat(fillItems);
@@ -3473,12 +3566,12 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
                 text_overrides: { "INFO": brand, "SUB-INFO": model },
                 _recap: true
             });
-            // Imagens do BIN preenchendo [s0, s1] em loop
+            // Imagens do BIN preenchendo [s0, s1] em loop.
+            // Se não tiver imagens, faz loop dos VÍDEOS do bin (mesma lógica do auto-fill).
             var bmR = binMedia[String(folderRef)];
             var imgsR = (bmR && bmR.images) ? bmR.images : [];
-            if (imgsR.length === 0) {
-                log('recap: produto folder "' + folderRef + '" sem imagens no bin PROD_' + folderRef + ' — bloco sem imagens.', "warn");
-            } else {
+            var vidsR = (bmR && bmR.videos) ? bmR.videos : [];
+            if (imgsR.length > 0) {
                 var nImgs = imgsR.length;
                 var numSlots = Math.max(1, Math.ceil((s1 - s0) / slotDur));
                 for (var k = 0; k < numSlots; k++) {
@@ -3492,6 +3585,27 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
                         _zoomPreset: (k % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
                     });
                 }
+            } else if (vidsR.length > 0) {
+                // Sem imagens — loop dos vídeos do bin pra cobrir [s0, s1].
+                var vcurR = s0;
+                var loopIdxR = 0;
+                var safetyR = vidsR.length * 50;
+                var nVidLooped = 0;
+                while (vcurR < s1 - 0.2 && safetyR-- > 0) {
+                    var rv = vidsR[loopIdxR % vidsR.length];
+                    var rvdur = rv.dur || 0;
+                    if (!(rvdur > 0)) { loopIdxR++; continue; }
+                    var thisDurR = Math.min(rvdur, s1 - vcurR);
+                    out.push({
+                        type: "product_video", bin_name: rv.name,
+                        time_seconds: vcurR, duration: thisDurR,
+                        track: 1, _autofill: true, _recap: true
+                    });
+                    vcurR += rvdur; loopIdxR++; nVidLooped++;
+                }
+                log('recap: produto folder "' + folderRef + '" sem imagens — usando ' + nVidLooped + ' vídeo(s) do bin em loop.', "info");
+            } else {
+                log('recap: produto folder "' + folderRef + '" sem imagens E sem vídeos no bin PROD_' + folderRef + ' — bloco sem mídia.', "warn");
             }
         });
     });
@@ -3688,6 +3802,13 @@ function doMount(mountData, btn) {
                         }
                     }
                     log("    » [p" + ((r.product || 0) + 1) + " item " + r.index + "] " + msg, sf.ok ? "info" : "warn");
+                }
+
+                // Log do efeito "fundo borrado" pros product_video verticais/quadrados
+                if (r.type === "product_video" && r.blurBg && r.blurBg.log && r.blurBg.log.length) {
+                    var bgPrefix = r.blurBg.applied ? "✓ blur-bg" : "blur-bg";
+                    log("    » [p" + ((r.product || 0) + 1) + " item " + r.index + "] " + bgPrefix + ": " + r.blurBg.log.join(" | "),
+                        r.blurBg.applied ? "ok" : "info");
                 }
             });
         } catch (e) {

@@ -1467,37 +1467,86 @@ function copyClipTextWithSubstitutions(srcClip, dstClip, product, extras, logArr
 function exportTranscription(outputPath) {
     try {
         var seq = app.project.activeSequence;
-        if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
+        if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa no Premiere." });
 
-        var exported = false;
+        var fr = 30;
+        try { fr = seq.getSettings().videoFrameRate; } catch (e) {}
 
-        try {
-            seq.exportAsCaptions(outputPath, "SRT", seq.getSettings().videoFrameRate, 0, seq.end);
-            exported = true;
-        } catch (e1) { /* silencioso */ }
+        // Apaga arquivo prévio pra ter certeza que o exporte de agora é o que lemos.
+        try { var prev = new File(outputPath); if (prev.exists) prev.remove(); } catch (eDel) {}
 
-        if (!exported) {
+        var attempts = [];
+
+        function readFileIfNonEmpty(p) {
             try {
-                var qe = app.enableQE();
-                var qeSeq = qe.project.getActiveSequence();
-                qeSeq.exportAsTextBased(outputPath);
-                exported = true;
-            } catch (e2) { /* silencioso */ }
+                var f = new File(p);
+                if (!f.exists) return null;
+                f.encoding = "UTF-8"; f.open("r");
+                var c = f.read(); f.close();
+                if (c && c.replace(/\s/g, "").length > 0) return c;
+            } catch (e) {}
+            return null;
         }
 
-        if (!exported) {
-            return JSON.stringify({ error: "Não foi possível exportar automaticamente. Exporte manualmente: Text > ··· > Export to SRT." });
+        function tryMethod(name, fn) {
+            try {
+                fn();
+                var c = readFileIfNonEmpty(outputPath);
+                if (c) return c;
+                attempts.push(name + ": ok mas arquivo vazio/ausente");
+            } catch (e) {
+                attempts.push(name + ": " + e.message);
+            }
+            return null;
         }
 
-        var file = new File(outputPath);
-        if (!file.exists) return JSON.stringify({ error: "Arquivo SRT não encontrado após exportação." });
+        var content = null;
 
-        file.encoding = "UTF-8";
-        file.open("r");
-        var content = file.read();
-        file.close();
+        // 1) API estável: exportAsCaptions (precisa de legendas na timeline)
+        content = tryMethod("seq.exportAsCaptions", function () {
+            seq.exportAsCaptions(outputPath, "SRT", fr, 0, seq.end);
+        });
 
-        return JSON.stringify({ success: true, content: content });
+        // 2) Tentativa direta na seq (algumas versões expõem)
+        if (!content) {
+            content = tryMethod("seq.exportAsTextBased", function () {
+                seq.exportAsTextBased(outputPath);
+            });
+        }
+
+        // 3) QE DOM como último recurso
+        if (!content) {
+            content = tryMethod("qe.exportAsTextBased", function () {
+                app.enableQE();
+                qe.project.getActiveSequence().exportAsTextBased(outputPath);
+            });
+        }
+
+        // Diagnóstico: tem captions na timeline?
+        var hasCaptions = false;
+        try {
+            if (seq.captionTracks && seq.captionTracks.numTracks) {
+                for (var ct = 0; ct < seq.captionTracks.numTracks; ct++) {
+                    var tr = seq.captionTracks[ct];
+                    if (tr && tr.clips && tr.clips.numItems > 0) { hasCaptions = true; break; }
+                }
+            }
+        } catch (eCt) {}
+
+        if (!content) {
+            var msg;
+            if (!hasCaptions) {
+                msg = "A sequência não tem LEGENDAS na timeline (só transcrição não basta). " +
+                      "Solução: no painel Text → aba 'Legendas' → '+ Criar legendas a partir da transcrição'. " +
+                      "Depois clique este botão de novo.";
+            } else {
+                msg = "Legendas existem mas a exportação falhou. " +
+                      "Como fallback: no painel Text, exporte manualmente como .srt e use 'Carregar arquivo'.";
+            }
+            return JSON.stringify({ error: msg, hasCaptions: hasCaptions, attempts: attempts });
+        }
+
+        return JSON.stringify({ success: true, content: content, hasCaptions: hasCaptions });
     } catch (e) {
         return JSON.stringify({ error: e.message });
     }
@@ -4622,6 +4671,161 @@ function muteInsertedAudio(seq, name, startSec) {
 // Insere um item da BIN (por nome) num tempo/track. Pra vídeo: corta se passar da
 // janela e remove o áudio. Pra imagem (forceExact=true): seta a duração exata (stills
 // podem ter qualquer duração). Aplica Scale to Frame Size.
+// Aplica o efeito "fundo borrado" pra vídeos verticais/quadrados:
+// 1. Mantém o clip original (que JÁ tem scale FILL) e adiciona Gaussian Blur ~50.
+// 2. Duplica o vídeo na track ACIMA com scale FIT (cabe inteiro, sem cortar topo/baixo)
+//    e sem blur — esse é o foreground.
+// O resultado é o vídeo cheio visível em cima de uma versão borrada cobrindo o frame todo.
+// Só aplica em vídeo (forceExact=false). Se W/H >= 1.2 considera landscape e pula.
+function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes) {
+    var info = { applied: false, log: [] };
+    try {
+        if (!sfRes || !sfRes.srcW || !sfRes.srcH || !sfRes.seqW || !sfRes.seqH) {
+            info.log.push("sem dims — skipped"); return info;
+        }
+        var srcW = sfRes.srcW, srcH = sfRes.srcH;
+        var seqW = sfRes.seqW, seqH = sfRes.seqH;
+        if (srcW >= srcH * 1.2) { info.log.push("landscape (" + srcW + "x" + srcH + ") — skipped"); return info; }
+
+        info.log.push("vertical/quadrado " + srcW + "x" + srcH);
+
+        // ── 1. Acha o clip original (com FILL scale já aplicado).
+        var origTrack = seq.videoTracks[trackIndex];
+        var startT = new Time(); startT.ticks = toTicks(startSec);
+        var targetTicks = parseFloat(startT.ticks);
+        var origClip = null, bestDD = Infinity;
+        for (var c = 0; c < origTrack.clips.numItems; c++) {
+            var cc = origTrack.clips[c];
+            if (!cc || !cc.start) continue;
+            var dd = Math.abs(parseFloat(cc.start.ticks) - targetTicks);
+            if (dd < bestDD) { bestDD = dd; origClip = cc; }
+        }
+        if (!origClip) { info.log.push("clip orig não achado"); return info; }
+
+        // ── 2. Adiciona Gaussian Blur ao clip original via QE.
+        var blurEffectName = null;
+        try {
+            app.enableQE();
+            var qeSeq = qe.project.getActiveSequence();
+            var qeTr = qeSeq.getVideoTrackAt(trackIndex);
+            var qeClip = null;
+            for (var qi = 0; qi < qeTr.numItems; qi++) {
+                var qit = qeTr.getItemAt(qi);
+                if (!qit || !qit.start) continue;
+                try {
+                    if (Math.abs(parseFloat(qit.start.ticks) - targetTicks) < 4e9) { qeClip = qit; break; }
+                } catch (eQS) {}
+            }
+            if (qeClip) {
+                var effectCandidates = ["Gaussian Blur", "Desfoque Gaussiano", "Desfoque gaussiano"];
+                for (var en = 0; en < effectCandidates.length; en++) {
+                    try {
+                        var fx = qe.project.getVideoEffectByName(effectCandidates[en]);
+                        if (fx) {
+                            qeClip.addVideoEffect(fx);
+                            blurEffectName = effectCandidates[en];
+                            info.log.push("blur fx adicionado: " + blurEffectName);
+                            break;
+                        }
+                    } catch (eFn) {}
+                }
+                if (!blurEffectName) info.log.push("blur fx: não encontrado por nome em " + effectCandidates.join("/"));
+            } else {
+                info.log.push("qeClip não achado");
+            }
+        } catch (eAdd) { info.log.push("addEffect err: " + eAdd.message); }
+
+        // ── 3. Set Blurriness = 50 no clip original.
+        if (blurEffectName) {
+            try {
+                for (var ci = 0; ci < origClip.components.numItems; ci++) {
+                    var comp = origClip.components[ci];
+                    var cdn = comp.displayName || "";
+                    if (cdn === blurEffectName) {
+                        for (var pi = 0; pi < comp.properties.numItems; pi++) {
+                            var prop = comp.properties[pi];
+                            var pdn = prop.displayName || "";
+                            // "Blurriness" (EN), "Borrão" (PT). Fallback: a 1ª prop numérica.
+                            if (pdn === "Blurriness" || pdn === "Borrão" || pdn.toLowerCase().indexOf("blur") >= 0) {
+                                prop.setValue(50, true);
+                                info.log.push("blurriness=50 (" + pdn + ")");
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            } catch (eBlur) { info.log.push("setBlur err: " + eBlur.message); }
+        }
+
+        // ── 4. Duplica clip na track ACIMA (track+1).
+        var topTrackIdx = trackIndex + 1;
+        var topTrack = ensureVideoTrack(seq, topTrackIdx);
+        topTrack.overwriteClip(item, startT);
+
+        var topClip = null, bestDD2 = Infinity;
+        for (var tc = 0; tc < topTrack.clips.numItems; tc++) {
+            var tcc = topTrack.clips[tc];
+            if (!tcc || !tcc.start) continue;
+            var dd2 = Math.abs(parseFloat(tcc.start.ticks) - targetTicks);
+            if (dd2 < bestDD2) { bestDD2 = dd2; topClip = tcc; }
+        }
+
+        // Trim mesmo end (espelha duração do original).
+        if (topClip && durationSec > 0) {
+            try {
+                var natEnd2 = parseFloat(topClip.end.ticks) / TICKS_PER_SECOND;
+                var wantEnd2 = startSec + durationSec;
+                if (natEnd2 > wantEnd2 + 0.04) {
+                    var et2 = new Time(); et2.ticks = toTicks(wantEnd2);
+                    topClip.end = et2;
+                }
+            } catch (eTrim2) {}
+        }
+
+        // Muta o áudio do duplicado (igual ao original).
+        try { muteInsertedAudio(seq, item.name, startSec); } catch (eMute) {}
+
+        // ── 5. Aplica FIT scale ao top clip (cabe inteiro, sem cortar).
+        if (topClip) {
+            var fitRatio = Math.min(seqW / srcW, seqH / srcH); // FIT
+            var fitScale = fitRatio * 100;
+            try {
+                var motion = null;
+                var motionNames = ["Motion", "Movimento"];
+                for (var ci2 = 0; ci2 < topClip.components.numItems; ci2++) {
+                    var compDN2 = topClip.components[ci2].displayName || "";
+                    for (var mn = 0; mn < motionNames.length; mn++) {
+                        if (compDN2 === motionNames[mn]) { motion = topClip.components[ci2]; break; }
+                    }
+                    if (motion) break;
+                }
+                if (motion) {
+                    var scaleProp = null;
+                    var scaleNames = ["Scale", "Escala"];
+                    for (var pj2 = 0; pj2 < motion.properties.numItems; pj2++) {
+                        var propDN2 = motion.properties[pj2].displayName || "";
+                        for (var sn = 0; sn < scaleNames.length; sn++) {
+                            if (propDN2 === scaleNames[sn]) { scaleProp = motion.properties[pj2]; break; }
+                        }
+                        if (scaleProp) break;
+                    }
+                    if (scaleProp) {
+                        scaleProp.setValue(fitScale, true);
+                        info.log.push("top FIT scale=" + fitScale.toFixed(1) + "% (track " + topTrackIdx + ")");
+                    }
+                }
+            } catch (eFitScale) { info.log.push("fitScale err: " + eFitScale.message); }
+        }
+
+        info.applied = !!blurEffectName;
+        return info;
+    } catch (e) {
+        info.log.push("exception: " + e.message);
+        return info;
+    }
+}
+
 function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH, forceExact) {
     try {
         var seq = app.project.activeSequence;
@@ -4651,8 +4855,18 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
         }
         // Remove o áudio (só relevante pra vídeo; imagem não tem).
         muteInsertedAudio(seq, item.name, startSec);
-        try { applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH); } catch (eSF) {}
-        return JSON.stringify({ success: true });
+
+        var sfRes = null;
+        try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH); } catch (eSF) {}
+
+        // Efeito de fundo borrado pra vídeos verticais/quadrados (não pra imagens).
+        var blurBg = null;
+        if (!forceExact) {
+            try { blurBg = applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes); }
+            catch (eBg) { blurBg = { applied: false, log: ["exception: " + eBg.message] }; }
+        }
+
+        return JSON.stringify({ success: true, scaleToFrame: sfRes, blurBg: blurBg });
     } catch (e) {
         return JSON.stringify({ error: e.message });
     }
@@ -5251,6 +5465,7 @@ function mountFromJSON(jsonString) {
                     error:         r.error         || null,
                     updateLog:     r.updateLog     || null,
                     scaleToFrame:  r.scaleToFrame  || null,
+                    blurBg:        r.blurBg        || null,
                     animation:     r.animation     || null,
                     mogrt:         r.mogrt         || false,
                     mediaReplaced: r.mediaReplaced || false,

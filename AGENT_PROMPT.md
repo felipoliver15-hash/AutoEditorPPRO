@@ -45,13 +45,44 @@ da transcrição.
 O plugin resolve cada `after_phrase` casando **palavras consecutivas** da transcrição
 (ele ignora acentos, pontuação e maiúsculas, mas a sequência de palavras precisa bater).
 
-- Use 3–7 palavras **consecutivas e distintas**, exatamente como aparecem na transcrição.
-- Números costumam vir como dígitos (`1500`, `330`) ou por extenso (`cinco zero zero sete`).
-  Use **como está na transcrição**.
+- Use 3–7 palavras **consecutivas e distintas**, **EXATAMENTE como aparecem na transcrição**.
+  Não "limpe", não "formate", não "abrevie" — **copie literal**.
 - As frases devem estar em **ordem cronológica** (o plugin avança um cursor; uma frase
   só é buscada depois da anterior). Nunca repita a mesma frase pra dois pontos diferentes
   esperando que caiam em momentos distintos, a menos que ela realmente apareça 2×.
 - Prefira frases que aparecem **uma única vez** no trecho relevante.
+
+### ⛔ ARMADILHAS COMUNS (causam "Frase não encontrada" e o produto inteiro é PULADO)
+
+Os erros mais frequentes — TODOS por usar o que está no roteiro/lista de produtos em vez do
+que foi **falado** na transcrição:
+
+1. **Preços com `R$`** — a transcrição transcreve `reais`, NÃO `R$`.
+   - ❌ `"fica entre 250 e 300 R$"`
+   - ✅ `"fica entre 250 e 300 reais"`  (se foi assim na transcrição)
+   - ✅ `"entre duzentos e cinquenta e trezentos reais"` (se foi por extenso)
+
+2. **Números formatados (`1.430`, `1430`) vs por extenso (`mil quatrocentos e trinta`)** —
+   o Whisper/Premiere muitas vezes transcreve números MAIORES por extenso e pequenos como
+   dígitos. **Olhe a transcrição** pra cada número antes de decidir.
+   - ❌ `"varia entre 690 e 1430 reais"` (você "limpou")
+   - ✅ `"varia entre 690 e mil quatrocentos e trinta reais"` (se foi assim)
+   - ❌ `"500 R$"` ✅ `"quinhentos reais"` (se foi por extenso)
+   - Atenção: NUNCA invente híbridos sem sentido tipo `"1000 430"` (= o agente
+     escrevendo o que ele acha que ouviu) — ou é todo por extenso, ou todo em dígito,
+     conforme a transcrição.
+
+3. **Pontuação/símbolos** que a transcrição NÃO traz: `R$`, `%`, `°`, `&`, etc.
+   - ❌ `"motor de 1500 W"` ✅ `"motor de 1500 watts"` (geralmente o transcribe escreve a unidade)
+   - ❌ `"profundidade de 65 mm"` ✅ `"profundidade de 65 milímetros"`
+   - ❌ `"até 45°"` ✅ `"até 45 graus"`
+
+4. **Marcas/nomes próprios** podem aparecer fonéticos na transcrição.
+   - Se a transcrição escreveu `"a vape"` em vez de `"a WAP"`, use o que ESTÁ lá.
+
+> **REGRA SEM EXCEÇÃO:** a `after_phrase` é uma **busca textual literal** na transcrição.
+> Não é uma descrição do que foi dito, é uma **cópia** do que foi dito. Quando em dúvida,
+> Ctrl+F na transcrição antes de escrever.
 
 ---
 
