@@ -3568,12 +3568,24 @@ function getPropTextValue(prop) {
     return null;
 }
 
-// Remove prefixo "R$ " e garante sufixo ",00" — espelha priceNum() do JS
-// Nota: ExtendScript (ES3) não tem String.trim() — usa regex
+// Idioma do projeto atual (definido em mountFromJSON a partir de data.language).
+// "" = padrão português (reais, vírgula). "en"/"en-US" = inglês (dólar, ponto).
+var _AE_LANG = "";
+
+// Formata o número do preço conforme _AE_LANG — espelha formatPriceByLang() do JS:
+//   - inglês → decimal com PONTO ("240" → "240.00")
+//   - outros → decimal com VÍRGULA ("240" → "240,00")
+// Remove o símbolo de moeda (R$, US$, $) — o símbolo vem do template.
+// Nota: ExtendScript (ES3) não tem String.trim() — usa regex.
 function priceNum(val) {
-    var n = String(val || "").replace(/^R\$\s*/i, "").replace(/^\s+|\s+$/g, "");
+    var n = String(val || "").replace(/^\s*(R\$|US\$|USD|\$)\s*/i, "").replace(/^\s+|\s+$/g, "");
     if (!n) return "";
-    return n.indexOf(",") >= 0 ? n : n + ",00";
+    if (/^en/i.test(_AE_LANG)) {
+        n = n.replace(",", ".");
+        return /\.\d/.test(n) ? n : n + ".00";
+    }
+    n = n.replace(".", ",");
+    return /,\d/.test(n) ? n : n + ",00";
 }
 
 // Substitui [[PLACEHOLDER]] dentro do texto com o valor do produto.
@@ -5111,18 +5123,47 @@ function getProjectDir() {
 // ─── ABA RECURSOS (setup: bins de produto + sequências de template) ──────────
 
 // Próximo número de produto disponível: varre os bins PROD_<n> no root e
-// retorna o maior + 1 (1 se nenhum existir).
+// retorna o MENOR número livre (1, 2, 3...). Assim, se um produto foi removido
+// (ex: apagou PROD_1 pela lixeira), o próximo reaproveita a lacuna (PROD_1) em
+// vez de pular pro maior+1.
 function getNextProductNumber() {
     try {
         var root = app.project.rootItem;
-        var max = 0;
+        var used = {};
         for (var i = 0; i < root.children.numItems; i++) {
             var nm = String(root.children[i].name || "");
             var m = nm.match(/^PROD_(\d+)$/i);
-            if (m) { var v = parseInt(m[1], 10); if (v > max) max = v; }
+            if (m) used[parseInt(m[1], 10)] = true;
         }
-        return JSON.stringify({ next: max + 1 });
+        var next = 1;
+        while (used[next]) next++;
+        return JSON.stringify({ next: next });
     } catch (e) { return JSON.stringify({ next: 1, error: e.message }); }
+}
+
+// Remove o bin PROD_<folder> do projeto (se existir). Usado pelo botão 🗑 do
+// card de produto, pra limpar um produto e poder recriá-lo do zero. Não apaga
+// arquivos do disco — só o bin (e seu conteúdo) dentro do projeto.
+function deleteProductBin(folder) {
+    try {
+        var root = app.project.rootItem;
+        var target = ("PROD_" + String(folder)).toUpperCase();
+        var removed = false;
+        for (var i = 0; i < root.children.numItems; i++) {
+            var c = root.children[i];
+            if (String(c.name || "").toUpperCase() === target) {
+                try {
+                    if (typeof c.deleteBin === "function") c.deleteBin();
+                    else if (typeof c.delete === "function") c.delete();
+                    else { return JSON.stringify({ ok: false, error: "API de remoção indisponível nesta versão." }); }
+                    removed = true;
+                } catch (eD) { return JSON.stringify({ ok: false, error: eD.message }); }
+                break;
+            }
+        }
+        try { app.project.save(); } catch (eS) {}
+        return JSON.stringify({ ok: true, removed: removed });
+    } catch (e) { return JSON.stringify({ ok: false, error: e.message }); }
 }
 
 // Diálogo nativo de seleção de arquivos (vídeos + imagens), multi-seleção.
@@ -5182,6 +5223,14 @@ function addProductMedia(folder, filePathsJSON, refPath) {
         if (refPath) {
             var item = _findBinChildByMediaPath(bin, refPath);
             if (item) {
+                // Evita dois itens "png" (ex: re-setando a referência): renomeia
+                // qualquer "png" anterior que não seja o novo alvo.
+                try {
+                    for (var k = 0; k < bin.children.numItems; k++) {
+                        var ch = bin.children[k];
+                        if (ch !== item && String(ch.name) === "png") { ch.name = "png_anterior"; }
+                    }
+                } catch (ePrev) {}
                 try { item.name = "png"; refResult = "ok (png)"; }
                 catch (eR) { refResult = "rename falhou: " + eR.message; }
             } else {
@@ -5551,6 +5600,7 @@ function fitKeyPointMogrts(seq, fits) {
 function mountFromJSON(jsonString) {
     try {
         var data = eval("(" + jsonString + ")");
+        _AE_LANG = (data && data.language) ? String(data.language) : ""; // moeda do preço por idioma
         var seq  = app.project.activeSequence;
         if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
 

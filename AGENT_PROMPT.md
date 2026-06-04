@@ -87,9 +87,37 @@ da transcrição.
 > Specs numéricas das lower thirds (ex: "550W", "800ml") continuam vindo do conteúdo/transcrição
 > (não estão na lista) — use seu melhor julgamento.
 
+## IDIOMA E MOEDA (detecte pela transcrição)
+
+O mesmo agente atende canais em **português** e em **inglês**. Detecte o idioma da
+transcrição e **adicione no ROOT do JSON** o campo:
+
+```json
+"language": "pt"   // português → moeda em reais (R$), decimal com VÍRGULA
+"language": "en"   // inglês    → moeda em dólar ($), decimal com PONTO
+```
+
+O plugin usa esse campo pra formatar o **número** do preço. Regras pros campos
+`price_min` / `price_max`:
+
+| idioma | `price_min`/`price_max` no JSON | como aparece na tela |
+|--------|--------------------------------|----------------------|
+| `pt`   | `"R$ 190,00"` ou `"190,00"` (vírgula) | `R$ 190,00` |
+| `en`   | `"190.00"` — **só o número, com PONTO, SEM `$`** | `$190.00` |
+
+- O **símbolo** da moeda (`R$` / `$`) **vem do template** `[TEMPLATE]PRECO` do canal —
+  **NÃO** coloque o símbolo no `price_min`/`price_max` quando for inglês (escreva só o número).
+  (Em português pode manter o `R$` como hoje; o plugin remove e mantém a vírgula.)
+- **Decimal**: inglês usa **ponto** (`19.99`, `190.00`); português usa **vírgula** (`19,99`, `190,00`).
+- Se `language` faltar, o plugin assume **português** (comportamento atual).
+
+> ⚠️ Isso vale só pros campos EXIBIDOS. Os **gatilhos** (`after_phrase` etc.) continuam
+> literais da transcrição: num vídeo em inglês o preço falado vira algo como
+> `"between 190 and 200 dollars"` (não `"$"`), igual ao que a transcrição traz.
+
 ## SAÍDA
 - **Somente** um objeto JSON válido (sem comentários, sem texto fora do JSON).
-- Estrutura: `{ "products": [...], "conclusion": {...}, "key_points": [...] }`.
+- Estrutura: `{ "language": "pt"|"en", "products": [...], "conclusion": {...}, "key_points": [...] }`.
 
 ---
 
@@ -201,7 +229,7 @@ Preencha com base no que a narração diz sobre o papel daquele produto no compa
 - Se a narração não deixar claro o posicionamento, omita o campo (o plugin usa só o nome).
 
 - `folder`: numeração sequencial em string — `"1"`, `"2"`, `"3"`, `"4"`... (ordem do vídeo).
-- `price_min` / `price_max`: formato `"R$ NNN"`.
+- `price_min` / `price_max`: **pt** → `"R$ NNN"` (vírgula no decimal); **en** → `"NNN.NN"` (só número, ponto, sem `$`). Ver seção **IDIOMA E MOEDA**.
 - `image_prompts`: **exatamente 7** prompts, **em inglês**, fotografia de produto
   profissional, 16:9. NÃO inclua texto/marca por cima — só a cena. (O plugin já reforça
   "mostrar o produto EXATO da imagem de referência".)
@@ -500,5 +528,5 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
    - **`brand`/`name`/`price_min`/`price_max` vêm da LISTA do usuário** (grafia normalizada), **não** da transcrição. Gatilhos (`after_phrase` etc.) seguem a transcrição literal.
 5. Exatamente 7 `image_prompts` em inglês por produto (sequencial) ou por produto do confronto (head-to-head).
 6. Lower thirds nos specs (curtas), recap se houver, key_points pra cada CTA.
-7. `folder` sequencial "1","2",...; preços "R$ NNN".
+7. `folder` sequencial "1","2",...; **`language`** no root (`"pt"`/`"en"`) e preços no formato do idioma (pt: `"R$ NNN,NN"` · en: `"NNN.NN"` sem `$`).
 8. `chapter_tag` preenchido em **cada produto** onde a narração deixa claro o posicionamento.

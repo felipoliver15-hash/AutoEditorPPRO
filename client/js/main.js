@@ -7,6 +7,22 @@ var srtEntries  = [];    // entradas SRT — fallback
 var _atomCache    = null; // stream de átomos normalizados da transcrição (findPhraseTime)
 var _atomCacheSrc = null; // referência de transcriptWords usada pra montar o cache
 
+// Formata o NÚMERO do preço conforme o idioma do projeto (loadedJSON.language):
+//   - inglês ("en", "en-US"...) → decimal com PONTO:  "240" → "240.00"
+//   - português/outros          → decimal com VÍRGULA: "240" → "240,00"
+// Em ambos remove o símbolo de moeda (R$, US$, $, €) — o símbolo vem do TEMPLATE.
+function formatPriceByLang(val, lang) {
+    var n = String(val == null ? '' : val).replace(/^\s*(R\$|US\$|USD|\$|€)\s*/i, '').replace(/^\s+|\s+$/g, '');
+    if (!n) return '';
+    var isEN = /^en/i.test(String(lang || ''));
+    if (isEN) {
+        n = n.replace(',', '.');                 // "240,00" → "240.00"
+        return /\.\d/.test(n) ? n : n + '.00';
+    }
+    n = n.replace('.', ',');                      // "240.00" → "240,00"
+    return /,\d/.test(n) ? n : n + ',00';
+}
+
 // Chave do projeto atual no localStorage (preenchida em initProjectPersistence)
 var _projectKey = "autoeditor_default";
 
@@ -405,6 +421,7 @@ function initMontar() {
     });
     document.getElementById("btn-load-json").addEventListener("click", openJSONPicker);
     document.getElementById("btn-load-srt").addEventListener("click",  openSRTPicker);
+    document.getElementById("btn-load-from-folder").addEventListener("click", loadJSONsFromProjectFolder);
     document.getElementById("btn-mount").addEventListener("click", mountVideo);
 }
 
@@ -843,7 +860,7 @@ function detectFfmpeg(cb) {
 // NÃO importa pro bin — entrega o caminho final via onDone(err, filePath).
 // onProgress(text) é chamado durante o download (texto pra UI da barra).
 // Usado pela barrinha "Baixar do YouTube" dentro do card de Adicionar Produto.
-function downloadYTToFolder(folder, url, onProgress, onDone) {
+function downloadYTToFolder(folder, url, onProgress, onDone, chooser) {
     if (!url) { onDone(new Error("Cole uma URL primeiro.")); return; }
     var extDir = getExtensionRootClient();
     cs.evalScript("getProjectDir()", function (rawPrj) {
@@ -853,14 +870,160 @@ function downloadYTToFolder(folder, url, onProgress, onDone) {
             onDone(new Error("Salve o projeto antes (a pasta AutoEditor_Downloads vai ao lado do .prproj)."));
             return;
         }
-        runYtDlp(url, folder, extDir, prjDir, onProgress, onDone);
+
+        var host = "";
+        try { host = ((String(url).match(/^https?:\/\/([^\/?#]+)/i) || [])[1] || "").toLowerCase(); } catch (e) {}
+        var isAmazon = /(^|\.)amazon\./.test(host);
+
+        // Só a Amazon agrupa vários vídeos numa "playlist" de produto (oficiais +
+        // relacionados). Para esses links, sonda primeiro: se houver mais de um
+        // vídeo, abre o seletor pro usuário escolher quais baixar. YouTube e os
+        // demais seguem direto (1 vídeo), sem o custo extra da sondagem.
+        if (isAmazon && typeof chooser === "function") {
+            if (typeof onProgress === "function") onProgress("analisando link…");
+            probePlaylist(url, extDir, function (info) {
+                if (info && info.count > 1) {
+                    chooser(info.entries, function (selected) {
+                        if (!selected || !selected.length) {
+                            recLog("Seleção cancelada — nada baixado.", "warn");
+                            onDone(null, []); // [] = nenhum arquivo (consumidores ignoram)
+                            return;
+                        }
+                        runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, selected.join(","));
+                    });
+                } else {
+                    runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, "1");
+                }
+            });
+        } else {
+            runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, "1");
+        }
     });
+}
+
+// Sonda um link rapidamente (--flat-playlist) e devolve
+// {count, entries:[{index,title,duration,thumbnail}]}. Devolve null se a
+// sondagem falhar (aí o chamador baixa normalmente o 1º item).
+function probePlaylist(url, extDir, cb) {
+    var cp = tryNodeRequire('child_process'), fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    if (!cp) { cb(null); return; }
+    var bundled = extDir ? pmod.join(extDir, "bin", "yt-dlp.exe") : "";
+    var ytdlp; try { ytdlp = (bundled && fs.existsSync(bundled)) ? bundled : "yt-dlp"; } catch (e) { ytdlp = "yt-dlp"; }
+    var spawnEnv = {}; try { Object.keys(process.env || {}).forEach(function (k) { spawnEnv[k] = process.env[k]; }); } catch (e) {}
+    spawnEnv.PYTHONIOENCODING = "utf-8";
+    var args = ["--flat-playlist", "--dump-single-json", "--no-warnings", url];
+    var out = "", ch;
+    try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv }); }
+    catch (e) { cb(null); return; }
+    try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (e) {}
+    ch.stdout.on("data", function (d) { out += d.toString(); });
+    ch.on("error", function () { cb(null); });
+    ch.on("close", function () {
+        var j; try { j = JSON.parse(out); } catch (e) { cb(null); return; }
+        if (j && j.entries && j.entries.length) {
+            var entries = [];
+            for (var i = 0; i < j.entries.length; i++) {
+                var e = j.entries[i] || {};
+                entries.push({
+                    index: e.playlist_index || (i + 1),
+                    title: e.title || ("Vídeo " + (i + 1)),
+                    duration: e.duration || 0,
+                    thumbnail: e.thumbnail || ""
+                });
+            }
+            cb({ count: entries.length, entries: entries });
+        } else {
+            cb({ count: 1, entries: [] });
+        }
+    });
+}
+
+// Modal de seleção (quando um link tem mais de um vídeo). Chama
+// onChoose(arrayDeIndices 1-based) com o que foi marcado, ou onChoose(null) ao cancelar.
+function chooseVideosModal(entries, onChoose) {
+    function fmtDur(s) { s = Math.round(s || 0); if (!s) return ""; var m = Math.floor(s / 60), ss = s % 60; return m + ":" + (ss < 10 ? "0" : "") + ss; }
+    var done = false;
+    function finish(sel) { if (done) return; done = true; try { document.body.removeChild(overlay); } catch (e) {} onChoose(sel); }
+
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center";
+
+    var box = document.createElement("div");
+    box.style.cssText = "background:#2a2a2a;border:1px solid #555;border-radius:8px;width:92%;max-width:520px;max-height:86%;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.5)";
+    overlay.appendChild(box);
+
+    var head = document.createElement("div");
+    head.style.cssText = "padding:12px 14px;border-bottom:1px solid #444;font-weight:bold";
+    head.textContent = "Este link tem " + entries.length + " vídeos — escolha quais baixar:";
+    box.appendChild(head);
+
+    var tools = document.createElement("div");
+    tools.style.cssText = "padding:6px 14px;border-bottom:1px solid #3a3a3a;font-size:12px";
+    var aAll = document.createElement("a"); aAll.href = "#"; aAll.textContent = "Marcar todos"; aAll.style.cssText = "color:#9cf;margin-right:12px;text-decoration:none";
+    var aNone = document.createElement("a"); aNone.href = "#"; aNone.textContent = "Desmarcar todos"; aNone.style.cssText = "color:#9cf;text-decoration:none";
+    tools.appendChild(aAll); tools.appendChild(aNone);
+    box.appendChild(tools);
+
+    var list = document.createElement("div");
+    list.style.cssText = "overflow-y:auto;padding:6px 10px;flex:1";
+    box.appendChild(list);
+
+    var checks = [];
+    entries.forEach(function (e) {
+        var row = document.createElement("label");
+        row.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px;border-bottom:1px solid #333;cursor:pointer";
+        var cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true; cb.value = e.index;
+        checks.push(cb);
+        var thumbBox = document.createElement("div");
+        thumbBox.style.cssText = "width:64px;height:40px;flex:0 0 64px;background:#111;border-radius:3px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:10px;color:#666";
+        if (e.thumbnail) {
+            var img = document.createElement("img");
+            img.src = e.thumbnail; img.style.cssText = "width:100%;height:100%;object-fit:cover";
+            img.onerror = function () { try { thumbBox.removeChild(img); } catch (x) {} thumbBox.textContent = "▶"; };
+            thumbBox.appendChild(img);
+        } else { thumbBox.textContent = "▶"; }
+        var info = document.createElement("div");
+        info.style.cssText = "flex:1;min-width:0";
+        var t = document.createElement("div"); t.textContent = e.title; t.style.cssText = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+        var d = document.createElement("div"); d.textContent = fmtDur(e.duration); d.style.cssText = "font-size:11px;color:#888";
+        info.appendChild(t); info.appendChild(d);
+        row.appendChild(cb); row.appendChild(thumbBox); row.appendChild(info);
+        list.appendChild(row);
+    });
+
+    var foot = document.createElement("div");
+    foot.style.cssText = "padding:10px 14px;border-top:1px solid #444;display:flex;gap:8px;justify-content:flex-end";
+    var cancelB = document.createElement("button"); cancelB.textContent = "Cancelar";
+    var okB = document.createElement("button"); okB.className = "btn-primary";
+    foot.appendChild(cancelB); foot.appendChild(okB);
+    box.appendChild(foot);
+
+    function refreshOk() {
+        var n = checks.filter(function (c) { return c.checked; }).length;
+        okB.textContent = "Baixar selecionados (" + n + ")";
+        okB.disabled = (n === 0);
+    }
+    aAll.onclick = function (ev) { ev.preventDefault(); checks.forEach(function (c) { c.checked = true; }); refreshOk(); };
+    aNone.onclick = function (ev) { ev.preventDefault(); checks.forEach(function (c) { c.checked = false; }); refreshOk(); };
+    checks.forEach(function (c) { c.addEventListener("change", refreshOk); });
+    cancelB.onclick = function () { finish(null); };
+    okB.onclick = function () {
+        var sel = checks.filter(function (c) { return c.checked; }).map(function (c) { return parseInt(c.value, 10); });
+        finish(sel);
+    };
+    overlay.addEventListener("click", function (ev) { if (ev.target === overlay) finish(null); });
+
+    refreshOk();
+    document.body.appendChild(overlay);
 }
 
 // Baixa o vídeo via yt-dlp. Entrega o caminho final via onDone(err, path).
 // onProgress(text) é chamado a cada 5% pra atualizar a UI (ex: rótulo do botão).
-function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
+function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems) {
     function fail(msg) { onDone(new Error(msg)); }
+    playlistItems = playlistItems || "1";
+    // multi = a seleção pega mais de um item (tem vírgula/intervalo, ex "2,4,5"/"1-3").
+    var multi = (playlistItems !== String(parseInt(playlistItems, 10)));
     var cp   = tryNodeRequire('child_process');
     var fs   = tryNodeRequire('fs');
     var pmod = tryNodeRequire('path');
@@ -889,6 +1052,7 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
 
     recLog(hasBundled ? "yt-dlp: embutido" : "yt-dlp: PATH");
     recLog("Baixando → PRODUTO " + folder + " | " + url);
+    if (multi) recLog("Itens selecionados: " + playlistItems);
 
     detectFfmpeg(function (ff) {
         var formatSel, extraArgs = [];
@@ -914,11 +1078,12 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             formatSel = "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]";
         }
 
-        var args = ["-f", formatSel].concat(extraArgs).concat([
-            // --playlist-items 1 (no lugar de --no-playlist) limita a 1 vídeo
-            // por URL E não confunde o extractor da Amazon (que trata cada
-            // produto como playlist de 1 item — --no-playlist faz ele falhar).
-            "--playlist-items", "1",
+        // Seleção de itens da "playlist" (Amazon trata cada produto como playlist).
+        // playlistItems vem do seletor (ex "2,4,5") ou "1" no caso normal.
+        // Usamos --playlist-items (e não --no-playlist, que faz a Amazon falhar).
+        var selectArgs = ["--playlist-items", playlistItems];
+
+        var args = ["-f", formatSel].concat(extraArgs).concat(selectArgs).concat([
             "--restrict-filenames", "--no-warnings",
             "--force-overwrites",
             "-o", pmod.join(outDir, "%(title)s.%(ext)s"),
@@ -926,7 +1091,7 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             url
         ]);
 
-        var ytFinalPath = "", lastPctReported = -1, lastActivityMs = Date.now();
+        var ytFinalPath = "", ytPaths = [], lastPctReported = -1, lastActivityMs = Date.now();
         function processLine(line) {
             var s = line.replace(/\r$/, "").trim();
             if (!s) return;
@@ -948,8 +1113,12 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
                 if (typeof onProgress === "function") onProgress("baixando (HLS) " + ft[1]);
                 return;
             }
-            if (!ytFinalPath && /^[A-Za-z]:[\\\/]/.test(s) && /\.(mp4|mkv|webm|m4a)$/i.test(s)) {
-                ytFinalPath = s;
+            // Linhas que começam com letra de unidade (C:\, D:\…) e terminam em
+            // extensão de vídeo são o --print after_move:%(filepath)s. No modo
+            // multi (amazon.com) cada vídeo emite uma; acumula todas.
+            if (/^[A-Za-z]:[\\\/]/.test(s) && /\.(mp4|mkv|webm|m4a)$/i.test(s)) {
+                if (ytPaths.indexOf(s) < 0) ytPaths.push(s);
+                if (!ytFinalPath) ytFinalPath = s;
                 return;
             }
             if (/^ERROR\b/i.test(s)) { recLog(s, "err"); return; }
@@ -1007,7 +1176,12 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             if (outSink.buf) processLine(outSink.buf);
             if (errSink.buf) processLine(errSink.buf);
             if (code !== 0) { fail("yt-dlp encerrou com código " + code); return; }
-            if (!ytFinalPath || !fs.existsSync(ytFinalPath)) {
+            // Valida os caminhos coletados via --print (remove inexistentes).
+            ytPaths = ytPaths.filter(function (p) { try { return fs.existsSync(p); } catch (e) { return false; } });
+
+            // Fallback: se nada veio via --print, pega o(s) arquivo(s) criado(s)
+            // nesta execução — no modo multi, todos; senão, o mais novo.
+            if (!ytPaths.length) {
                 try {
                     var entries = fs.readdirSync(outDir).map(function (n) {
                         var p = pmod.join(outDir, n);
@@ -1020,14 +1194,18 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
                     });
                     entries.sort(function (a, b) { return b.m - a.m; });
                     if (entries.length) {
-                        ytFinalPath = entries[0].p;
-                        recLog("⚠ Caminho final não veio via --print, usando o mais novo na pasta: " + ytFinalPath, "warn");
+                        ytPaths = multi
+                            ? entries.map(function (e) { return e.p; })
+                            : [entries[0].p];
+                        recLog("⚠ Caminho final não veio via --print, usando arquivo(s) novo(s) da pasta.", "warn");
                     }
                 } catch (eF) {}
             }
-            if (!ytFinalPath) { fail("Download terminou (exit 0) mas nenhum arquivo novo foi criado — provavelmente o extractor falhou silenciosamente."); return; }
-            recLog("✓ Baixado: " + ytFinalPath, "ok");
-            onDone(null, ytFinalPath);
+            if (!ytPaths.length) { fail("Download terminou (exit 0) mas nenhum arquivo novo foi criado — provavelmente o extractor falhou silenciosamente."); return; }
+            recLog("✓ Baixado(s): " + ytPaths.length + " arquivo(s).", "ok");
+            ytPaths.forEach(function (p) { recLog("   • " + p, "ok"); });
+            // No modo multi entrega o array inteiro; senão, o caminho único (compat).
+            onDone(null, multi ? ytPaths : ytPaths[0]);
         });
     });
 }
@@ -1063,11 +1241,22 @@ function renderProductCard(n, opts) {
     var refPath = null;     // imagem marcada como referência (png), só pré-criação
     var _isCreated = !!(opts && opts.restored); // true se restaurado do localStorage
     var _isExpanded = true; // staging visível (drop/url/list/botões)
+    var _busy = false;      // true enquanto analisa/baixa link → trava o "Criar/Adicionar"
 
+    var header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:6px";
     var title = document.createElement("div");
-    title.style.cssText = "font-weight:bold;margin-bottom:6px";
+    title.style.cssText = "font-weight:bold;flex:1";
     title.textContent = "PRODUTO " + n;
-    card.appendChild(title);
+    header.appendChild(title);
+    // Botão remover (só aparece em produto já criado) — limpa o estado preso e
+    // apaga o bin PROD_N do projeto, pra poder recriar do zero.
+    var delBtn = document.createElement("button");
+    delBtn.textContent = "🗑";
+    delBtn.title = "Remover PRODUTO " + n + " (apaga o bin PROD_" + n + " do projeto)";
+    delBtn.style.cssText = "background:none;border:none;color:#c66;cursor:pointer;font-size:14px;display:none";
+    header.appendChild(delBtn);
+    card.appendChild(header);
 
     // === Staging (expanded) ===
     var expandedView = document.createElement("div");
@@ -1134,6 +1323,7 @@ function renderProductCard(n, opts) {
         _isExpanded = !collapsed;
         expandedView.style.display = collapsed ? "none" : "";
         collapsedAddBtn.style.display = (collapsed && _isCreated) ? "" : "none";
+        delBtn.style.display = _isCreated ? "" : "none"; // remover só faz sentido se criado
     }
 
     // Abre o staging pra adicionar mais arquivos a um PRODUTO já criado.
@@ -1151,6 +1341,26 @@ function renderProductCard(n, opts) {
 
     collapsedAddBtn.addEventListener("click", expandForAddMore);
 
+    delBtn.addEventListener("click", function () {
+        if (!window.confirm("Remover PRODUTO " + n + "?\n\nApaga o bin PROD_" + n + " do projeto (se existir) e tira o produto do plugin. Os arquivos em disco NÃO são apagados.")) return;
+        delBtn.disabled = true;
+        cs.evalScript("deleteProductBin(" + JSON.stringify(n) + ")", function (raw) {
+            var r = {}; try { r = JSON.parse(raw); } catch (e) {}
+            if (r && r.ok) {
+                recLog("✓ PRODUTO " + n + " removido" + (r.removed ? " (bin apagado)." : " (bin não existia)."), "ok");
+            } else {
+                recLog("⚠ Não apaguei o bin PROD_" + n + ": " + (r.error || raw) + " — removido só do plugin.", "warn");
+            }
+            // Esquece do estado/UI independentemente (o objetivo é destravar).
+            var idx = _createdProducts.indexOf(n);
+            if (idx >= 0) _createdProducts.splice(idx, 1);
+            saveProjectData();
+            try { container.removeChild(card); } catch (e) {}
+            if (_pendingProductCard === card) releaseAddBtn();
+            if (typeof updateMountButton === "function") updateMountButton();
+        });
+    });
+
     function renderList() {
         listEl.innerHTML = "";
         if (!files.length) {
@@ -1158,11 +1368,19 @@ function renderProductCard(n, opts) {
             submitBtn.disabled = true;
             return;
         }
-        // Referência (png) só importa na criação INICIAL — adicionar mais arquivos
-        // NÃO mexe na ref existente no bin.
+        // Na criação INICIAL, auto-seleciona a 1ª imagem como referência.
+        // Em add-more (produto já criado) NÃO auto-seleciona: a ref só muda se o
+        // usuário escolher explicitamente (senão o host mantém a atual).
         if (!_isCreated && (!refPath || !files.some(function (f) { return f.path === refPath; }))) {
             var firstImg = files.filter(function (f) { return f.isImage; })[0];
             refPath = firstImg ? firstImg.path : null;
+        }
+        // Dica em add-more, quando há imagem: dá pra (re)definir a referência.
+        if (_isCreated && files.some(function (f) { return f.isImage; })) {
+            var note = document.createElement("div");
+            note.style.cssText = "font-size:10px;color:#8c9;margin-bottom:4px";
+            note.textContent = "Clique numa imagem (ou marque \"ref (png)\") pra defini-la como referência. Sem escolher, a atual é mantida.";
+            listEl.appendChild(note);
         }
         files.forEach(function (f) {
             var row = document.createElement("div");
@@ -1172,13 +1390,11 @@ function renderProductCard(n, opts) {
                 var thumb = document.createElement("img");
                 thumb.src = "file:///" + f.path.replace(/\\/g, "/");
                 var isRef = (f.path === refPath);
-                thumb.style.cssText = "width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:2px solid " + (isRef ? "#9cf" : "#444") + ";cursor:" + (_isCreated ? "default" : "pointer");
-                if (!_isCreated) {
-                    thumb.addEventListener("click", function () {
-                        refPath = f.path;
-                        renderList();
-                    });
-                }
+                thumb.style.cssText = "width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:2px solid " + (isRef ? "#9cf" : "#444") + ";cursor:pointer";
+                thumb.addEventListener("click", function () {
+                    refPath = f.path;
+                    renderList();
+                });
                 row.appendChild(thumb);
             } else {
                 var tag = document.createElement("span");
@@ -1191,8 +1407,8 @@ function renderProductCard(n, opts) {
             nameSpan.textContent = f.name;
             row.appendChild(nameSpan);
 
-            // Radio ref (png) só na criação inicial.
-            if (!_isCreated && f.isImage) {
+            // Radio ref (png): na criação inicial OU pra trocar a referência depois.
+            if (f.isImage) {
                 var lbl = document.createElement("label");
                 lbl.style.cssText = "font-size:10px;color:#9cf;cursor:pointer;white-space:nowrap";
                 var radio = document.createElement("input");
@@ -1216,7 +1432,20 @@ function renderProductCard(n, opts) {
 
             listEl.appendChild(row);
         });
-        submitBtn.disabled = false;
+        submitBtn.disabled = _busy; // durante análise/download fica travado
+    }
+
+    // Trava/destrava os controles do card enquanto analisa link ou baixa, pra não
+    // criar/adicionar o produto com arquivos ainda incompletos.
+    function setBusy(busy) {
+        _busy = busy;
+        cancelBtn.disabled = busy;
+        if (collapsedAddBtn) collapsedAddBtn.disabled = busy;
+        if (delBtn) delBtn.disabled = busy;
+        drop.style.pointerEvents = busy ? "none" : "";
+        drop.style.opacity = busy ? "0.5" : "";
+        if (busy) submitBtn.disabled = true;
+        else renderList(); // re-define o submit conforme há (ou não) arquivos
     }
 
     function addPaths(paths) {
@@ -1255,12 +1484,14 @@ function renderProductCard(n, opts) {
     // Cada vídeo baixado entra no staging automaticamente.
     function downloadUrlQueue(urls) {
         ytBtn.disabled = true; ytIn.disabled = true;
+        setBusy(true);
         var origLabel = ytBtn.textContent;
         var i = 0, ok = 0, failed = 0;
         recLog("Fila de download: " + urls.length + " link(s)…");
         function next() {
             if (i >= urls.length) {
                 ytBtn.disabled = false; ytIn.disabled = false; ytBtn.textContent = origLabel;
+                setBusy(false);
                 recLog("✓ Fila concluída: " + ok + " baixado(s)" + (failed ? ", " + failed + " falhou" : "") + ".",
                        failed ? "warn" : "ok");
                 return;
@@ -1272,9 +1503,10 @@ function renderProductCard(n, opts) {
                 function onProgress(label) { ytBtn.textContent = (i + 1) + "/" + urls.length + " " + label; },
                 function onDone(err, filePath) {
                     if (err) { failed++; recLog("✗ link " + (i + 1) + ": " + err.message, "err"); }
-                    else { ok++; addPaths([filePath]); }
+                    else { var ps = [].concat(filePath); ok += ps.length; addPaths(ps); }
                     i++; next();
-                }
+                },
+                chooseVideosModal
             );
         }
         next();
@@ -1312,6 +1544,7 @@ function renderProductCard(n, opts) {
         if (multi.length > 1) { ytIn.value = ""; downloadUrlQueue(multi); return; }
         var url = multi.length ? multi[0] : raw;
         ytBtn.disabled = true; ytIn.disabled = true;
+        setBusy(true);
         var originalLabel = ytBtn.textContent;
         ytBtn.textContent = "Baixando…";
         downloadYTToFolder(n, url,
@@ -1319,10 +1552,12 @@ function renderProductCard(n, opts) {
             function onDone(err, filePath) {
                 ytBtn.disabled = false; ytIn.disabled = false;
                 ytBtn.textContent = originalLabel;
+                setBusy(false);
                 if (err) { recLog("✗ " + err.message, "err"); return; }
                 ytIn.value = "";
-                addPaths([filePath]); // entra no staging — vai pro bin no submit
-            }
+                addPaths([].concat(filePath)); // string OU array (multi-vídeo) → staging
+            },
+            chooseVideosModal
         );
     });
     ytIn.addEventListener("keydown", function (e) {
@@ -1345,8 +1580,10 @@ function renderProductCard(n, opts) {
         if (!files.length) return;
         submitBtn.disabled = true; cancelBtn.disabled = true;
         var paths = files.map(function (f) { return f.path; });
-        // Em add-more: refPath = "" pra NÃO mexer na referência do bin existente.
-        var refArg = _isCreated ? "" : (refPath || "");
+        // refPath só é setado se o usuário escolher uma imagem como referência.
+        // Em add-more, se ele NÃO escolher, refArg = "" → o host mantém a ref atual.
+        // Se escolher (ex: re-setar o png após apagar), o host renomeia pra "png".
+        var refArg = refPath || "";
         var arg = JSON.stringify(n) + "," +
                   JSON.stringify(JSON.stringify(paths)) + "," +
                   JSON.stringify(refArg);
@@ -2300,26 +2537,101 @@ function openJSONPicker() {
         if (!file) return;
         var filePath = file.path || file.name;
         readTextWithEncodingFallback(file, function (content) {
-            try {
-                loadedJSON = JSON.parse(content);
-                document.getElementById("json-path").value = filePath;
-                updateMountButton();
-                if (typeof updateIAButtonsEnabled === "function") updateIAButtonsEnabled();
-                var isMulti = !!(loadedJSON.products && loadedJSON.products.length);
-                if (isMulti) {
-                    var total = loadedJSON.products.reduce(function (acc, p) { return acc + (p.timeline || []).length; }, 0);
-                    log("JSON carregado: " + loadedJSON.products.length + " produto(s), " + total + " item(s) na timeline.", "ok");
-                } else {
-                    log("JSON carregado: " + (loadedJSON.timeline || []).length + " item(s) na timeline.", "ok");
-                }
-                _savedJsonPath = filePath;
-                saveProjectData();
-            } catch (err) {
-                log("JSON inválido: " + err.message, "error");
-            }
+            try { _applyMappingContent(content, filePath); }
+            catch (err) { log("JSON inválido: " + err.message, "error"); }
         });
     };
     input.click();
+}
+
+// Aplica o conteúdo de um JSON de mapeamento ao estado + UI. Lança se o JSON
+// for inválido (o chamador trata). Compartilhado entre o seletor de arquivo e
+// o carregamento automático pela pasta do projeto.
+function _applyMappingContent(content, filePath) {
+    loadedJSON = JSON.parse(content);
+    document.getElementById("json-path").value = filePath;
+    updateMountButton();
+    if (typeof updateIAButtonsEnabled === "function") updateIAButtonsEnabled();
+    var isMulti = !!(loadedJSON.products && loadedJSON.products.length);
+    if (isMulti) {
+        var total = loadedJSON.products.reduce(function (acc, p) { return acc + (p.timeline || []).length; }, 0);
+        log("JSON carregado: " + loadedJSON.products.length + " produto(s), " + total + " item(s) na timeline.", "ok");
+    } else {
+        log("JSON carregado: " + (loadedJSON.timeline || []).length + " item(s) na timeline.", "ok");
+    }
+    _savedJsonPath = filePath;
+    saveProjectData();
+}
+
+// Carrega automaticamente o JSON de mapeamento (*_autoeditor.json) E a
+// transcrição (.json do Premiere) da PASTA do projeto. Pega o mais recente de
+// cada tipo; identifica por nome ("autoeditor" = mapeamento) e valida a
+// transcrição pelo conteúdo (precisa parsear como JSON de palavras do Premiere).
+function loadJSONsFromProjectFolder() {
+    var btn = document.getElementById("btn-load-from-folder");
+    if (btn) { btn.disabled = true; }
+    function reenable() { if (btn) btn.disabled = false; }
+
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        var prjDir = "";
+        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; } catch (e) {}
+        if (!prjDir) { log("Salve o projeto primeiro — preciso da pasta do .prproj pra buscar os JSONs.", "error"); reenable(); return; }
+
+        var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+        if (!fs || !pmod) { log("Node indisponível pra listar a pasta.", "error"); reenable(); return; }
+
+        var names;
+        try { names = fs.readdirSync(prjDir); } catch (e) { log("Não consegui ler a pasta do projeto: " + e.message, "error"); reenable(); return; }
+
+        var jsons = [];
+        names.forEach(function (n) {
+            if (!/\.json$/i.test(n)) return;
+            var p = pmod.join(prjDir, n), m = 0;
+            try { m = fs.statSync(p).mtimeMs; } catch (e) {}
+            jsons.push({ name: n, path: p, mtime: m });
+        });
+        if (!jsons.length) { log("Nenhum .json encontrado na pasta do projeto: " + prjDir, "warn"); reenable(); return; }
+
+        jsons.sort(function (a, b) { return b.mtime - a.mtime; }); // mais recente primeiro
+        var mapFile  = jsons.filter(function (j) { return /autoeditor/i.test(j.name); })[0] || null;
+        var trCands  = jsons.filter(function (j) { return !/autoeditor/i.test(j.name); });
+
+        log("Pasta do projeto: " + jsons.length + " .json — buscando mapeamento e transcrição…");
+
+        // 1) Mapeamento (se houver) → 2) Transcrição (1ª candidata que validar).
+        if (mapFile) {
+            _autoLoadFile(mapFile.path, function (content) {
+                try { _applyMappingContent(content, mapFile.path); }
+                catch (e) { log("JSON de mapeamento inválido (" + mapFile.name + "): " + e.message, "error"); }
+                pickTranscript(0);
+            });
+        } else {
+            log("Nenhum *_autoeditor.json na pasta — pulei o mapeamento.", "warn");
+            pickTranscript(0);
+        }
+
+        // Tenta cada candidato (mais recente primeiro) até um parsear como transcrição.
+        function pickTranscript(idx) {
+            if (idx >= trCands.length) {
+                log(trCands.length ? "Nenhum .json da pasta parseou como transcrição do Premiere." : "Nenhum .json de transcrição na pasta.", "warn");
+                reenable();
+                return;
+            }
+            var cand = trCands[idx];
+            _autoLoadFile(cand.path, function (content) {
+                var ok = false;
+                try { ok = parsePremierTranscriptJSON(content).length > 0; } catch (e) { ok = false; }
+                if (ok) {
+                    loadTranscriptContent(content, cand.path);
+                    _savedTranscriptPath = cand.path;
+                    saveProjectData();
+                    reenable();
+                } else {
+                    pickTranscript(idx + 1);
+                }
+            });
+        }
+    });
 }
 
 // Lê um arquivo como texto. Se detectar caracteres de substituição (encoding errado),
@@ -2655,9 +2967,7 @@ function patchEGBlobsInXML(xml, placeholder, newText) {
 // Retorna: { '[[PRODUCT_PRICE_MIN]]': '<base64-348b>', '[[PRODUCT_PRICE_MAX]]': '...', ... }
 function extractPatchedEGBlobsForProduct(xml, product) {
     function priceNum(val) {
-        var n = String(val || '').replace(/^R\$\s*/i, '').trim();
-        if (!n) return '';
-        return n.indexOf(',') >= 0 ? n : n + ',00';
+        return formatPriceByLang(val, loadedJSON && loadedJSON.language);
     }
     var pairs = [
         ['[[PRODUCT_PRICE_MIN]]', priceNum(product.price_min || product.price)],
@@ -2854,12 +3164,9 @@ function patchPrprojForProduct(prprojPath, product, tempSuffix, templateRenames,
         found.push('reuid: ' + uidList.length + ' UIDs únicos, ' + replaced + ' substituições');
     })();
 
-    // Remove prefixo "R$ " (ou "R$") e garante sufixo ",00"
+    // Formata o número do preço conforme o idioma (ponto/vírgula) e remove a moeda.
     function priceNum(val) {
-        var n = String(val || '').replace(/^R\$\s*/i, '').trim();
-        if (!n) return '';
-        // Se já tem vírgula (ex: "330,50"), mantém; senão adiciona ",00"
-        return n.indexOf(',') >= 0 ? n : n + ',00';
+        return formatPriceByLang(val, loadedJSON && loadedJSON.language);
     }
     var pairs = [
         ['[[PRODUCT_PRICE_MIN]]', priceNum(product.price_min || product.price)],
@@ -3321,9 +3628,7 @@ function patchTemplateBlobsForProduct(prprojPath, product, blobInfos) {
     if (read.error) return { error: read.error };
 
     function priceNum(val) {
-        var n = String(val || '').replace(/^R\$\s*/i, '').trim();
-        if (!n) return '';
-        return n.indexOf(',') >= 0 ? n : n + ',00';
+        return formatPriceByLang(val, loadedJSON && loadedJSON.language);
     }
     function padNullTo(str, targetLen) {
         var r = str.length > targetLen ? str.substring(0, targetLen) : str;
