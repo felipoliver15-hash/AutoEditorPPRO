@@ -4,9 +4,14 @@ var cs          = new CSInterface();
 var loadedJSON  = null;  // objeto JSON de mapeamento carregado
 var transcriptWords = []; // palavras com timestamps (Premiere JSON) — modo preciso
 var srtEntries  = [];    // entradas SRT — fallback
+var _atomCache    = null; // stream de átomos normalizados da transcrição (findPhraseTime)
+var _atomCacheSrc = null; // referência de transcriptWords usada pra montar o cache
 
 // Chave do projeto atual no localStorage (preenchida em initProjectPersistence)
 var _projectKey = "autoeditor_default";
+
+// Números dos produtos já criados neste projeto (persistidos no localStorage)
+var _createdProducts = [];
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
 
@@ -41,19 +46,70 @@ function initTabs() {
 
 // ─── CAPÍTULOS (YouTube) ────────────────────────────────────────────────────
 
-function initCapitulos() {
-    var btn = document.getElementById("btn-copy-chapters");
-    if (btn) btn.addEventListener("click", function () {
-        var ta = document.getElementById("chapters-text");
-        var status = document.getElementById("chapters-copy-status");
-        if (!ta || !ta.value.trim()) {
-            if (status) status.textContent = "nada pra copiar";
-            return;
-        }
+// Chave localStorage para tags/benefícios dos capítulos (por projeto)
+var CHAPTERS_TAGS_STORAGE = "autoeditor_chapter_tags";
+
+function _chapterTagsKey() {
+    return _projectKey + "_chapter_tags";
+}
+
+function _loadChapterTags() {
+    try { return JSON.parse(localStorage.getItem(_chapterTagsKey()) || "{}"); } catch (e) { return {}; }
+}
+
+function _saveChapterTag(timeKey, val) {
+    try {
+        var tags = _loadChapterTags();
+        tags[timeKey] = val;
+        localStorage.setItem(_chapterTagsKey(), JSON.stringify(tags));
+    } catch (e) {}
+}
+
+function _copyText(text, statusEl) {
+    var ok = false;
+    try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
         ta.select();
-        var ok = false;
-        try { ok = document.execCommand("copy"); } catch (e) {}
-        if (status) status.textContent = ok ? "copiado!" : "selecione e copie manualmente (Ctrl+C)";
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+    } catch (e) {}
+    if (statusEl) {
+        statusEl.textContent = ok ? "copiado!" : "selecione e copie (Ctrl+C)";
+        setTimeout(function () { if (statusEl) statusEl.textContent = ""; }, 2500);
+    }
+}
+
+function initCapitulos() {
+    var status = document.getElementById("chapters-copy-status");
+
+    var btnNames = document.getElementById("btn-copy-names");
+    if (btnNames) btnNames.addEventListener("click", function () {
+        var rows = document.querySelectorAll("#chapters-list .chap-row");
+        if (!rows || !rows.length) { if (status) status.textContent = "nada pra copiar"; return; }
+        var lines = [];
+        rows.forEach(function (row) {
+            var ts = row.getAttribute("data-ts") || "";
+            var name = (row.querySelector(".chap-name") || {}).textContent || "";
+            lines.push(ts + " " + name);
+        });
+        _copyText(lines.join("\n"), status);
+    });
+
+    var btnTags = document.getElementById("btn-copy-tags");
+    if (btnTags) btnTags.addEventListener("click", function () {
+        var rows = document.querySelectorAll("#chapters-list .chap-row");
+        if (!rows || !rows.length) { if (status) status.textContent = "nada pra copiar"; return; }
+        var lines = [];
+        rows.forEach(function (row) {
+            var ts = row.getAttribute("data-ts") || "";
+            var input = row.querySelector(".chap-tag");
+            var val = input ? input.value.trim() : "";
+            if (val) lines.push(ts + " " + val);
+        });
+        if (!lines.length) { if (status) status.textContent = "nenhum benefício preenchido"; return; }
+        _copyText(lines.join("\n"), status);
     });
 
     var rbtn = document.getElementById("btn-refresh-chapters");
@@ -89,14 +145,56 @@ function fmtTimestamp(sec) {
     return (h > 0) ? (h + ":" + pad(m) + ":" + pad(s)) : (m + ":" + pad(s));
 }
 
-// Preenche a aba Capítulos com as linhas no formato do YouTube.
+// Preenche a aba Capítulos com linhas editáveis (nome + benefício).
 function renderChapters(chapters) {
-    var ta = document.getElementById("chapters-text");
-    if (!ta || !chapters || !chapters.length) return;
-    var lines = chapters.map(function (c) {
-        return fmtTimestamp(c.time) + " " + (c.title || "");
+    var container = document.getElementById("chapters-list");
+    if (!container || !chapters || !chapters.length) return;
+    var savedTags = _loadChapterTags();
+    container.innerHTML = "";
+
+    // Cabeçalho
+    var hdr = document.createElement("div");
+    hdr.style.cssText = "display:grid;grid-template-columns:56px 1fr 1fr;gap:4px;padding:2px 0 4px;border-bottom:1px solid #444;color:#888;font-size:10px";
+    hdr.innerHTML = "<span>tempo</span><span>nome</span><span>benefício (editável)</span>";
+    container.appendChild(hdr);
+
+    chapters.forEach(function (c) {
+        var ts = fmtTimestamp(c.time);
+        var timeKey = ts; // chave para localStorage
+
+        // Benefício: prioridade → marcador.comments → localStorage salvo → ""
+        var savedTag = savedTags[timeKey] !== undefined ? savedTags[timeKey] : (c.tag || "");
+
+        var row = document.createElement("div");
+        row.className = "chap-row";
+        row.setAttribute("data-ts", ts);
+        row.style.cssText = "display:grid;grid-template-columns:56px 1fr 1fr;gap:4px;align-items:center;padding:3px 0;border-bottom:1px solid #333";
+
+        var tsSpan = document.createElement("span");
+        tsSpan.style.cssText = "color:#888";
+        tsSpan.textContent = ts;
+
+        var nameSpan = document.createElement("span");
+        nameSpan.className = "chap-name";
+        nameSpan.style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ddd";
+        nameSpan.title = c.title || "";
+        nameSpan.textContent = c.title || "";
+
+        var tagInput = document.createElement("input");
+        tagInput.className = "chap-tag";
+        tagInput.type = "text";
+        tagInput.value = savedTag;
+        tagInput.placeholder = "ex: mais barato";
+        tagInput.style.cssText = "background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:3px;padding:2px 5px;font-size:11px;font-family:monospace;width:100%;box-sizing:border-box";
+        tagInput.addEventListener("input", function () {
+            _saveChapterTag(timeKey, tagInput.value);
+        });
+
+        row.appendChild(tsSpan);
+        row.appendChild(nameSpan);
+        row.appendChild(tagInput);
+        container.appendChild(row);
     });
-    ta.value = lines.join("\n");
 }
 
 // ─── PASTA RAIZ ───────────────────────────────────────────────────────────────
@@ -796,7 +894,10 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
         var formatSel, extraArgs = [];
         if (ff.ok) {
             recLog("ffmpeg: " + (ff.dir ? "embutido" : "PATH") + " — qualidade alta (merge vídeo+áudio).");
-            formatSel = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+            // PRIORIZA H.264 (avc1) + AAC — o Premiere NÃO decodifica VP9/AV1, então
+            // "ext=mp4" não basta (YouTube serve av01 em mp4 também → importava só o áudio).
+            // Cai pra avc1, depois mp4 sem av01/vp9, e por fim qualquer coisa.
+            formatSel = "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/bestvideo[ext=mp4][vcodec!*=av01][vcodec!*=vp09][vcodec!*=vp9]+bestaudio[ext=m4a]/best[ext=mp4]/best";
             extraArgs = [
                 "--merge-output-format", "mp4",
                 // Amazon (e vários outros) servem HLS num único format com codec
@@ -929,14 +1030,14 @@ function startNewProductCard() {
     });
 }
 
-function renderProductCard(n) {
+function renderProductCard(n, opts) {
     var container = document.getElementById("products-container");
     var card = document.createElement("div");
     card.style.cssText = "border:1px solid #444;border-radius:6px;padding:10px;margin-top:10px;background:#2a2a2a";
 
     var files = [];         // staged files (não-importados ainda) — pré OU adicionando mais
     var refPath = null;     // imagem marcada como referência (png), só pré-criação
-    var _isCreated = false; // PRODUTO já existe no Premiere
+    var _isCreated = !!(opts && opts.restored); // true se restaurado do localStorage
     var _isExpanded = true; // staging visível (drop/url/list/botões)
 
     var title = document.createElement("div");
@@ -990,7 +1091,14 @@ function renderProductCard(n) {
     card.appendChild(collapsedAddBtn);
 
     container.appendChild(card);
-    _pendingProductCard = card;
+
+    if (opts && opts.restored) {
+        // Card restaurado: já está criado, colapsa imediatamente sem bloquear o botão.
+        title.textContent = "✓ PRODUTO " + n;
+        setCollapsed(true);
+    } else {
+        _pendingProductCard = card;
+    }
 
     function releaseAddBtn() {
         _pendingProductCard = null;
@@ -1036,9 +1144,23 @@ function renderProductCard(n) {
             var row = document.createElement("div");
             row.style.cssText = "display:flex;align-items:center;gap:6px;padding:2px 0";
 
-            var tag = document.createElement("span");
-            tag.textContent = f.isImage ? "🖼" : "🎬";
-            row.appendChild(tag);
+            if (f.isImage) {
+                var thumb = document.createElement("img");
+                thumb.src = "file:///" + f.path.replace(/\\/g, "/");
+                var isRef = (f.path === refPath);
+                thumb.style.cssText = "width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:2px solid " + (isRef ? "#9cf" : "#444") + ";cursor:" + (_isCreated ? "default" : "pointer");
+                if (!_isCreated) {
+                    thumb.addEventListener("click", function () {
+                        refPath = f.path;
+                        renderList();
+                    });
+                }
+                row.appendChild(thumb);
+            } else {
+                var tag = document.createElement("span");
+                tag.textContent = "🎬";
+                row.appendChild(tag);
+            }
 
             var nameSpan = document.createElement("span");
             nameSpan.style.cssText = "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
@@ -1053,7 +1175,7 @@ function renderProductCard(n) {
                 radio.type = "radio";
                 radio.name = "ref_prod_" + n;
                 radio.checked = (f.path === refPath);
-                radio.addEventListener("change", function () { refPath = f.path; });
+                radio.addEventListener("change", function () { refPath = f.path; renderList(); });
                 lbl.appendChild(radio);
                 lbl.appendChild(document.createTextNode(" ref (png)"));
                 row.appendChild(lbl);
@@ -1161,6 +1283,9 @@ function renderProductCard(n) {
                     recLog(msg, "ok");
                     _isCreated = true;
                     title.textContent = "✓ PRODUTO " + n;
+                    // Persiste o produto no localStorage para restaurar ao reabrir
+                    if (_createdProducts.indexOf(n) < 0) _createdProducts.push(n);
+                    saveProjectData();
                     releaseAddBtn(); // libera o "+ Adicionar Produto"
                 } else {
                     recLog("✓ +" + r.imported + " arquivo(s) em PRODUTO " + n, "ok");
@@ -1993,11 +2118,10 @@ function initProjectPersistence() {
 }
 
 function saveProjectData() {
-    // (campo "root-folder" foi removido na migração pro modelo de bins —
-    // não acessar mais ou dá null.value)
     var data = {
-        transcriptPath: _savedTranscriptPath || "",
-        jsonPath:       _savedJsonPath       || ""
+        transcriptPath:  _savedTranscriptPath || "",
+        jsonPath:        _savedJsonPath       || "",
+        createdProducts: _createdProducts.slice() // [1, 2, 3, ...]
     };
     try { localStorage.setItem(_projectKey, JSON.stringify(data)); } catch(e) {}
 }
@@ -2013,6 +2137,14 @@ function restoreProjectPaths() {
             _savedTranscriptPath = data.transcriptPath;
             _autoLoadFile(data.transcriptPath, function(content) {
                 loadTranscriptContent(content, data.transcriptPath);
+            });
+        }
+
+        // Produtos já criados — restaura os cards no estado colapsado (só "+ ARQUIVO")
+        if (data.createdProducts && data.createdProducts.length) {
+            _createdProducts = data.createdProducts.slice();
+            _createdProducts.forEach(function(n) {
+                renderProductCard(n, { restored: true });
             });
         }
 
@@ -3233,6 +3365,15 @@ function mountVideo() {
         // image_transparent (foto do produto nos cards) vem da referência "png" do
         // bin PROD_N — definida depois, no callback de getProductBinMedia.
 
+        // cursor_reset: true → reinicia o cursor de busca pro início do vídeo.
+        // Necessário no modo head-to-head quando as frases de um produto aparecem
+        // intercaladas com as do anterior (ex: p2 tem frases em 24s mas o cursor
+        // chegou a 263s depois do PRECO do p1).
+        if (prod.cursor_reset) {
+            phraseCursor = parseFloat(prod.cursor_reset) > 0
+                ? parseFloat(prod.cursor_reset) : 0;
+        }
+
         // ── Snapshot do cursor no INÍCIO do produto ─────────────────────────
         // Usado por lower_thirds num pass separado pra não disputarem cursor com
         // PRODUTO/PRECO (cujos times naturalmente atravessam o trecho onde os
@@ -3377,8 +3518,22 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
     var namesJSON = JSON.stringify(JSON.stringify(nameList));
 
     // Query vídeos de produto (PROD_N) na bin ANTES de montar o auto-fill.
+    // Inclui também as pastas do global_fill (head-to-head) se existirem.
     var __folders = [];
     mountProducts.forEach(function (p) { if (p.folder != null) __folders.push(String(p.folder)); });
+    if (loadedJSON.global_fill) {
+        var __pushF = function (f) {
+            var fs = String(f);
+            if (__folders.indexOf(fs) < 0) __folders.push(fs);
+        };
+        if (loadedJSON.global_fill.folders) loadedJSON.global_fill.folders.forEach(__pushF);
+        // pastas referenciadas nos segmentos (modo head-to-head sincronizado)
+        if (loadedJSON.global_fill.segments) {
+            loadedJSON.global_fill.segments.forEach(function (s) {
+                (s.folders || []).forEach(__pushF);
+            });
+        }
+    }
     cs.evalScript("getProductBinMedia(" + JSON.stringify(JSON.stringify(__folders)) + ")", function (rawV) {
       var binMedia = {};
       try { binMedia = JSON.parse(rawV) || {}; } catch (eV) {}
@@ -3413,6 +3568,13 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
         var root = getRootFolder();
         var totalAutoFill = 0;
 
+        // Head-to-head: quando há global_fill, ele é o ÚNICO preenchedor da faixa
+        // de comparação. O auto-fill por produto é suprimido pra não colidir
+        // (senão p1 e p2 enchem quase o vídeo todo sobrepostos com o global_fill).
+        var globalFillActive = !!(loadedJSON.global_fill &&
+            ((loadedJSON.global_fill.folders && loadedJSON.global_fill.folders.length) ||
+             (loadedJSON.global_fill.segments && loadedJSON.global_fill.segments.length)));
+
         mountProducts.forEach(function(prod, pIdx) {
             var bm = binMedia[String(prod.folder)] || { videos: [], images: [], videoTotal: 0, ref: null };
             if (bm.videos.length === 0 && bm.images.length === 0) {
@@ -3424,6 +3586,12 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             prod.timeline = (prod.timeline || []).filter(function(it) {
                 return it.type !== "product_image" && it.type !== "product_video";
             });
+
+            // Head-to-head: pula o preenchimento por produto (global_fill cobre).
+            if (globalFillActive) {
+                if (pIdx === 0) log("Auto-fill por produto SUPRIMIDO (global_fill ativo cobre a faixa).", "info");
+                return;
+            }
 
             // Encontra PRODUTO e PRECO
             var produtoItem = null, precoItem = null;
@@ -3498,6 +3666,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     var vdur = Math.min(vdurFull, fillEnd - vcursor); // corta o último se passar
                     addedItems.push({
                         type: "product_video", bin_name: bm.videos[vi].name,
+                        bin_path: bm.videos[vi].path || null,
                         time_seconds: vcursor, duration: vdur, track: track, _autofill: true
                     });
                     vcursor += vdurFull; nVid++;
@@ -3516,6 +3685,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                         var thisDur = Math.min(lvdur, fillEnd - vcursor);
                         addedItems.push({
                             type: "product_video", bin_name: lv.name,
+                            bin_path: lv.path || null,
                             time_seconds: vcursor, duration: thisDur, track: track, _autofill: true
                         });
                         vcursor += lvdur; loopIdx++; videoLooped++;
@@ -3538,8 +3708,10 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                 var t0 = imgStart + i * slotDur;
                 var t1 = Math.min(t0 + slotDur, fillEnd);
                 if (t1 - t0 < 0.2) break;
+                var imgEntry = bm.images[i % nImg];
                 addedItems.push({
-                    type: "product_image", bin_name: bm.images[i % nImg].name,
+                    type: "product_image", bin_name: imgEntry.name,
+                    bin_path: imgEntry.path || null,
                     time_seconds: t0, duration: t1 - t0, animation: "none",
                     track: track, _autofill: true,
                     _zoomPreset: (i % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
@@ -3579,7 +3751,9 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
         // do produto — garantindo zero buracos independente da reserva do PRECO.
         // EXCEÇÃO: se um CTA cai nessa janela, o stock do CTA cobre — pulamos o fill.
         var postPrecoFill = 0;
-        for (var pf = 0; pf < mountProducts.length - 1; pf++) {
+        // Head-to-head: global_fill cobre toda a faixa → não roda o pós-preço
+        // por produto (evita sobreposição na cauda da comparação).
+        for (var pf = 0; !globalFillActive && pf < mountProducts.length - 1; pf++) {
             var prodA = mountProducts[pf];
             var bmA = binMedia[String(prodA.folder)];
             // Bin totalmente vazio (sem imagens E sem vídeos) → não tem como preencher.
@@ -3629,8 +3803,10 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     var ft0 = stretchEnd + kf * slotDur;
                     var ft1 = Math.min(ft0 + slotDur, nextStartPF);
                     if (ft1 - ft0 < 0.2) break;
+                    var imgEntryPF = bmA.images[kf % nImgsA];
                     fillItems.push({
-                        type: "product_image", bin_name: bmA.images[kf % nImgsA].name,
+                        type: "product_image", bin_name: imgEntryPF.name,
+                        bin_path: imgEntryPF.path || null,
                         time_seconds: ft0, duration: ft1 - ft0, animation: "none",
                         track: trackA, _autofill: true, _postpreco: true,
                         _zoomPreset: (kf % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
@@ -3648,6 +3824,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     var thisDurPF = Math.min(pvdur, nextStartPF - vcurPF);
                     fillItems.push({
                         type: "product_video", bin_name: pv.name,
+                        bin_path: pv.path || null,
                         time_seconds: vcurPF, duration: thisDurPF, track: trackA,
                         _autofill: true, _postpreco: true
                     });
@@ -3683,6 +3860,237 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                 lastProd.timeline = (lastProd.timeline || []).concat(recapItems);
                 lastProd.timeline.sort(function (a, b) { return (a.time_seconds || 0) - (b.time_seconds || 0); });
                 log("Recap: " + recapItems.length + " item(s) inserido(s) no final do vídeo.", "ok");
+            }
+        }
+
+        // ── GLOBAL FILL: preenchimento head-to-head ────────────────────────────
+        // Ativa SOMENTE se o JSON tiver "global_fill". Não afeta o modo padrão.
+        // Dois modos:
+        //   • SEGMENTOS (gf.segments): cada segmento define [start_phrase → próximo]
+        //     e quais pasta(s) mostrar nesse trecho → SINCRONIZA com a narração.
+        //     1 pasta = mostra só ela; 2+ pastas = intercala dentro do trecho;
+        //     pastas vazias [] = só marca o fim (boundary).
+        //   • INTERCALADO (legado, gf.folders): cicla as pastas cego entre
+        //     start_phrase e end_phrase.
+        // Adicionado como PRODUTO VIRTUAL no fim → processa depois de tudo,
+        // sobrescrevendo com overwriteClip sem conflito de _vidEnd.
+        log("Global fill: verificando (global_fill " + (loadedJSON.global_fill ? "presente" : "ausente") + ")...", "info");
+        if (loadedJSON.global_fill &&
+            ((loadedJSON.global_fill.folders && loadedJSON.global_fill.folders.length) ||
+             (loadedJSON.global_fill.segments && loadedJSON.global_fill.segments.length))) {
+            var gf = loadedJSON.global_fill;
+            var gfSlot    = parseFloat(gf.slot_duration || slotDur) || slotDur;
+            var gfTrack   = gf.track || 1;
+            var gfSegments = (gf.segments && gf.segments.length) ? gf.segments : null;
+
+            // União de TODAS as pastas referenciadas (topo + segmentos).
+            var gfFolderMap = {};
+            (gf.folders || []).forEach(function (f) { gfFolderMap[String(f)] = true; });
+            if (gfSegments) gfSegments.forEach(function (s) {
+                (s.folders || []).forEach(function (f) { gfFolderMap[String(f)] = true; });
+            });
+            var gfFolders = Object.keys(gfFolderMap);
+
+            // Filas circulares por pasta
+            var gfQueues = {};
+            var gfHasMedia = false;
+            gfFolders.forEach(function (folder) {
+                var bm = binMedia[folder] || {};
+                gfQueues[folder] = {
+                    images: bm.images || [], imgIdx: 0,
+                    videos: bm.videos || [], vidIdx: 0
+                };
+                if ((bm.images && bm.images.length) || (bm.videos && bm.videos.length)) gfHasMedia = true;
+                log("Global fill pasta " + folder + ": " +
+                    (bm.images ? bm.images.length : 0) + " img, " +
+                    (bm.videos ? bm.videos.length : 0) + " vid", "info");
+            });
+
+            var gfItems = [];
+            // Offset dentro de cada vídeo (por nome) — avança a janela a cada
+            // reutilização do mesmo clip (variedade visual). Compartilhado entre
+            // segmentos pra continuar avançando o tempo do vídeo.
+            var gfInOffsets = {};
+
+            // ── REMAP DE TRACKS (head-to-head) ─────────────────────────────────
+            // O fill é a BASE (tracks gfTrack e gfTrack+1) e roda CONTÍNUO. Em vez
+            // de reservar intervalos (que dependia de adivinhar a duração do card),
+            // subimos os cards (PRODUTO/PRECO) e o LIKE pra tracks ACIMA do fill e
+            // da lower third → o card sempre aparece por cima, nunca é comido.
+            // Prioridade visual: transição(5) > card/mogrt(4) > lower third/stock(3)
+            // > fill FIT(2) > fill blur(1). Transições NÃO se movem (ficam no topo,
+            // aplicando o efeito em tudo abaixo).
+            var HH_CARD_TRACK  = 4; // PRODUTO/PRECO + MOGRT do LIKE
+            var HH_STOCK_TRACK = 3; // stock (vídeo) do LIKE — acima do fill, abaixo do mogrt
+            var _hhMoved = 0;
+            mountProducts.forEach(function (p) {
+                (p.timeline || []).forEach(function (it) {
+                    if (it._globalfill) return;
+                    var tpl = (it.template || "").toUpperCase();
+                    if (tpl.indexOf("TRANSICAO") >= 0 || tpl.indexOf("TRANSIÇÃO") >= 0) return; // transições ficam
+                    if (it.type === "template_insert" && it._ltIndex === undefined &&
+                        (tpl.indexOf("PRODUTO") >= 0 || tpl.indexOf("PRECO") >= 0)) {
+                        it.track = HH_CARD_TRACK; _hhMoved++;        // card intro/preço
+                    } else if (it._keypoint && it.type === "template_insert") {
+                        it.track = HH_CARD_TRACK; _hhMoved++;        // MOGRT do LIKE
+                    } else if (it._keypoint) {
+                        it.track = HH_STOCK_TRACK; _hhMoved++;       // stock (vídeo) do LIKE
+                    }
+                });
+            });
+            log("Global fill: " + _hhMoved + " item(s) realocado(s) acima do fill (cards/LIKE) — fill roda contínuo embaixo.", "info");
+
+            // Fill contínuo: sem intervalos protegidos (o remap de tracks resolve).
+            var gfProtected = [];
+
+            // Subtrai os protegidos de [a,b] → lista de sub-intervalos livres.
+            // (gfProtected vazio no head-to-head → devolve o span inteiro = contínuo.)
+            var gfFreeIntervals = function (a, b) {
+                var free = [{ start: a, end: b }];
+                for (var pi = 0; pi < gfProtected.length; pi++) {
+                    var ps = gfProtected[pi].start, pe = gfProtected[pi].end;
+                    var next = [];
+                    for (var fi = 0; fi < free.length; fi++) {
+                        var fs = free[fi].start, fe = free[fi].end;
+                        if (pe <= fs || ps >= fe) { next.push(free[fi]); continue; } // sem overlap
+                        if (ps > fs) next.push({ start: fs, end: Math.min(ps, fe) });
+                        if (pe < fe) next.push({ start: Math.max(pe, fs), end: fe });
+                    }
+                    free = next;
+                }
+                return free;
+            };
+
+            // Gera slots num intervalo [spanStart, spanEnd) com a(s) pasta(s) dadas,
+            // pulando os trechos protegidos e emendando os slots com leve sobreposição
+            // (GFPAD) pra eliminar o gap preto de 1 frame entre clipes.
+            var GFPAD = 0.07;
+            var gfPushSpan = function (spanStart, spanEnd, folders) {
+                if (!folders || !folders.length) return 0;
+                if (!(spanEnd > spanStart + 0.2)) return 0;
+                var free = gfFreeIntervals(spanStart, spanEnd);
+                var idx = 0, added = 0;
+                for (var fi = 0; fi < free.length; fi++) {
+                    var a = free[fi].start, b = free[fi].end;
+                    if (!(b > a + 0.2)) continue;
+                    var t = a, safety = 5000;
+                    while (t < b - 0.2 && safety-- > 0) {
+                        var folder = String(folders[idx % folders.length]);
+                        var q = gfQueues[folder];
+                        // Anti-sliver: resto pequeno vira um slot só.
+                        var rem = b - t;
+                        var dur = (rem <= gfSlot * 1.4) ? rem : gfSlot;
+                        // Duração colocada na timeline: estende GFPAD pra emendar com o
+                        // próximo slot E atravessa a borda do segmento (a próxima
+                        // inserção sobrescreve a sobra) — mata o gap de 1 frame tanto
+                        // entre slots quanto nas EMENDAS de segmento.
+                        var placedDur = dur + GFPAD;
+                        if (q && q.videos.length) {
+                            var v = q.videos[q.vidIdx % q.videos.length]; q.vidIdx++;
+                            var key = v.name;
+                            var off = gfInOffsets[key] || 0;
+                            var vdur = v.dur || 60;
+                            gfInOffsets[key] = (off + dur) % vdur;
+                            gfItems.push({
+                                type: "product_video",
+                                bin_name: v.name, bin_path: v.path || null,
+                                time_seconds: t, duration: placedDur, in_offset: off,
+                                track: gfTrack, _autofill: true, _globalfill: true
+                            });
+                            added++;
+                        } else if (q && q.images.length) {
+                            var im = q.images[q.imgIdx % q.images.length]; q.imgIdx++;
+                            gfItems.push({
+                                type: "product_image",
+                                bin_name: im.name, bin_path: im.path || null,
+                                time_seconds: t, duration: placedDur, animation: "none",
+                                track: gfTrack, _autofill: true, _globalfill: true,
+                                _zoomPreset: (idx % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
+                            });
+                            added++;
+                        }
+                        t += dur; idx++;
+                    }
+                }
+                return added;
+            };
+
+            if (gfHasMedia && gfSegments) {
+                // ── MODO SEGMENTOS ─────────────────────────────────────────────
+                // Resolve o start de cada segmento via frase, com cursor pra frente.
+                var segCursor = 0;
+                var gfResolved = [];
+                gfSegments.forEach(function (s, si) {
+                    var st = null;
+                    if (s.start_phrase) {
+                        st = findPhraseTime(s.start_phrase, segCursor);
+                        if (st !== null) segCursor = st;
+                    }
+                    gfResolved.push({ start: st, folders: (s.folders || []).map(String) });
+                    log("Global fill seg " + (si + 1) + ": '" + (s.start_phrase || "(sem frase)") + "' → " +
+                        (st !== null ? st.toFixed(2) + "s" : "NÃO ENCONTRADA — segmento ignorado") +
+                        " pastas=[" + ((s.folders || []).join(",") || "fim") + "]", st !== null ? "info" : "warn");
+                });
+                // Fim geral: end_phrase, senão fim da transcrição.
+                var gfEndSeg = null;
+                if (gf.end_phrase) {
+                    var gfEP = findPhraseTime(gf.end_phrase, segCursor);
+                    if (gfEP !== null) gfEndSeg = gfEP;
+                    log("Global fill: end_phrase '" + gf.end_phrase + "' → " +
+                        (gfEP !== null ? gfEP.toFixed(2) + "s" : "NÃO ENCONTRADA (usando fim da transcrição)"), "info");
+                }
+                if (gfEndSeg === null) {
+                    var gfMx = 0;
+                    transcriptWords.forEach(function (w) { if ((w.time || 0) > gfMx) gfMx = w.time; });
+                    gfEndSeg = gfMx > 0 ? gfMx + gfSlot : segCursor + 300;
+                }
+                // Cada segmento resolvido enche até o PRÓXIMO segmento resolvido.
+                for (var si = 0; si < gfResolved.length; si++) {
+                    if (gfResolved[si].start === null) continue;
+                    var spanStart = gfResolved[si].start;
+                    var spanEnd = gfEndSeg;
+                    for (var sj = si + 1; sj < gfResolved.length; sj++) {
+                        if (gfResolved[sj].start !== null) { spanEnd = gfResolved[sj].start; break; }
+                    }
+                    var n = gfPushSpan(spanStart, spanEnd, gfResolved[si].folders);
+                    if (gfResolved[si].folders.length) {
+                        log("  » seg " + (si + 1) + " [" + spanStart.toFixed(1) + "→" + spanEnd.toFixed(1) +
+                            "]s pastas=[" + gfResolved[si].folders.join(",") + "] → " + n + " slot(s)", "info");
+                    }
+                }
+                log("Global fill (segmentos): " + gfItems.length + " slot(s) em " +
+                    gfResolved.length + " segmento(s), slot=" + gfSlot + "s", "ok");
+
+            } else if (gfHasMedia) {
+                // ── MODO INTERCALADO (legado) ──────────────────────────────────
+                var gfStart = 0;
+                if (gf.start_phrase) {
+                    var gfST = findPhraseTime(gf.start_phrase, 0);
+                    if (gfST !== null) gfStart = gfST;
+                    log("Global fill: start_phrase '" + gf.start_phrase + "' → " + (gfST !== null ? gfST.toFixed(2) + "s" : "NÃO ENCONTRADA (usando 0s)"), "info");
+                }
+                var gfEnd = null;
+                if (gf.end_phrase) {
+                    var gfET = findPhraseTime(gf.end_phrase, gfStart);
+                    if (gfET !== null) gfEnd = gfET;
+                    log("Global fill: end_phrase '" + gf.end_phrase + "' → " + (gfET !== null ? gfET.toFixed(2) + "s" : "NÃO ENCONTRADA (usando fim da transcrição)"), "info");
+                }
+                if (gfEnd === null) {
+                    var gfMaxT = 0;
+                    transcriptWords.forEach(function (w) { if ((w.time || 0) > gfMaxT) gfMaxT = w.time; });
+                    gfEnd = gfMaxT > 0 ? gfMaxT + gfSlot : gfStart + 300;
+                }
+                gfPushSpan(gfStart, gfEnd, (gf.folders || []).map(String));
+                log("Global fill (intercalado): " + gfItems.length + " slot(s) de " + gfFolders.join("+") +
+                    " [" + gfStart.toFixed(1) + "s → " + gfEnd.toFixed(1) + "s] slot=" + gfSlot + "s", "ok");
+            }
+
+            if (gfItems.length) {
+                // Produto virtual processado DEPOIS dos regulares → overwriteClip
+                // sobrescreve o auto-fill sem conflito de _vidEnd.
+                mountProducts.push({ folder: null, _virtual: true, timeline: gfItems });
+            } else {
+                log("Global fill: nenhum item gerado (bins sem mídia ou frases não encontradas)", "warn");
             }
         }
 
@@ -3787,8 +4195,10 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
                     var t0 = s0 + k * slotDur;
                     var t1 = Math.min(t0 + slotDur, s1);
                     if (t1 - t0 < 0.2) break;
+                    var imgEntryR = imgsR[k % nImgs];
                     out.push({
-                        type: "product_image", bin_name: imgsR[k % nImgs].name,
+                        type: "product_image", bin_name: imgEntryR.name,
+                        bin_path: imgEntryR.path || null,
                         time_seconds: t0, duration: t1 - t0, animation: "none",
                         track: 1, _autofill: true, _recap: true,
                         _zoomPreset: (k % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
@@ -3807,6 +4217,7 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
                     var thisDurR = Math.min(rvdur, s1 - vcurR);
                     out.push({
                         type: "product_video", bin_name: rv.name,
+                        bin_path: rv.path || null,
                         time_seconds: vcurR, duration: thisDurR,
                         track: 1, _autofill: true, _recap: true
                     });
@@ -4145,40 +4556,54 @@ function parseSRT(content) {
 // Isso evita matches duplicados entre produtos — ex: se "base é de aço estampado" aparece
 // na narração do produto 1 E do produto 2, o produto 2 precisa pegar a SEGUNDA ocorrência.
 // Sem esse parâmetro, voltava sempre o timestamp do produto 1 → desincronização.
+// Normaliza um texto em "átomos": minúsculo, sem acento, e com espaços especiais
+// (NBSP   etc.) e QUALQUER símbolo virando separador. Isso divide tokens
+// colados pela transcrição — ex: "95 R$" → ["95","r"] — pra casar com a frase
+// do agente escrita com espaço normal ("95 R$" → ["95","r"]).
+function _phraseAtoms(s) {
+    return accentFold(String(s == null ? "" : s)).toLowerCase()
+        .replace(/[^\w\s]/g, " ")  // símbolos ($,%,°,&,vírgula…) → separador
+        .split(/\s+/).filter(Boolean);
+}
+
 function findPhraseTime(phrase, startAfterTime) {
-    var p = accentFold(phrase).toLowerCase().trim().replace(/[^\w\s]/g, "");
     var minStart = (typeof startAfterTime === "number") ? startAfterTime : -1;
+    var phraseArr = _phraseAtoms(phrase);
+    var n         = phraseArr.length;
+    if (n === 0) return null;
 
     // ── Modo preciso: JSON do Premiere (palavra a palavra) ──────────────────
     if (transcriptWords.length > 0) {
-        var phraseArr = p.split(/\s+/).filter(Boolean);
-        var n         = phraseArr.length;
-
-        // Match exato (após minStart)
-        for (var i = 0; i <= transcriptWords.length - n; i++) {
-            if (transcriptWords[i].start < minStart) continue;
+        // (Re)monta o stream de átomos da transcrição, com cache por identidade.
+        // Cada palavra pode gerar 1+ átomos (token colado é dividido); cada átomo
+        // guarda o start da palavra de origem.
+        if (_atomCacheSrc !== transcriptWords || !_atomCache) {
+            _atomCache = [];
+            for (var k = 0; k < transcriptWords.length; k++) {
+                // USA .raw (texto original, ex: "95 R$") e NÃO .text — o parser
+                // pré-limpa o .text removendo NBSP/símbolos, gerando "95r" colado, o
+                // que impediria dividir em ["95","r"] pra casar com a frase do agente.
+                var sub = _phraseAtoms(transcriptWords[k].raw != null ? transcriptWords[k].raw : transcriptWords[k].text);
+                for (var a = 0; a < sub.length; a++) {
+                    _atomCache.push({ w: sub[a], start: transcriptWords[k].start });
+                }
+            }
+            _atomCacheSrc = transcriptWords;
+        }
+        var atoms = _atomCache;
+        for (var i = 0; i <= atoms.length - n; i++) {
+            if (atoms[i].start < minStart) continue;
             var match = true;
             for (var j = 0; j < n; j++) {
-                if (transcriptWords[i + j].text !== phraseArr[j]) { match = false; break; }
+                if (atoms[i + j].w !== phraseArr[j]) { match = false; break; }
             }
-            if (match) return transcriptWords[i].start;
+            if (match) return atoms[i].start;
         }
-
-        // Match parcial (ignora pontuação residual)
-        for (var i = 0; i <= transcriptWords.length - n; i++) {
-            if (transcriptWords[i].start < minStart) continue;
-            var match = true;
-            for (var j = 0; j < n; j++) {
-                var wClean = transcriptWords[i + j].text.replace(/[^\w]/g, "");
-                if (wClean !== phraseArr[j]) { match = false; break; }
-            }
-            if (match) return transcriptWords[i].start;
-        }
-
         return null;
     }
 
     // ── Fallback: SRT ────────────────────────────────────────────────────────
+    var p = phraseArr.join(" ");
     for (var i = 0; i < srtEntries.length; i++) {
         if (srtEntries[i].start < minStart) continue;
         if (srtEntries[i].text.indexOf(p) >= 0) return srtEntries[i].start;

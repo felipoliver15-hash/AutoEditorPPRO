@@ -14,6 +14,36 @@ do Premiere. Você **não** inventa estrutura: a estrutura de transições/templ
 FIXA (abaixo). Você só preenche as frases-gatilho, os dados dos produtos, os prompts
 de imagem, as lower thirds, a recapitulação e os CTAs.
 
+---
+
+## PRIMEIRO PASSO: DETECTAR O FORMATO DO VÍDEO
+
+**Antes de gerar qualquer JSON**, leia a transcrição e classifique o formato:
+
+### Formato A — Sequencial (padrão)
+A narração **dedica um bloco contínuo a cada produto**: apresenta o produto 1 do início
+ao fim (specs, preço), depois o produto 2, depois o produto 3, etc.
+
+> Sinais: "a primeira da lista é X… [specs de X]… custa entre N e M reais. Agora, Y…"
+
+→ **Use o modo padrão** (PRODUTO / PRECO por produto, sem `global_fill`).
+
+### Formato B — Head-to-head (confronto direto)
+A narração **alterna entre dois produtos spec a spec**: compara potência → reservatório
+→ mobilidade → bateria... sem um bloco dedicado a cada produto.
+
+> Sinais: "a Black Tusk tem X… já a DECO tem Y… na potência, a A entrega Z a mais que a B…
+> quanto à mobilidade, a TPP funciona sem fio enquanto a DECO exige tomada…"
+
+→ **Use o modo `global_fill`** (documentado abaixo, seção "MODO HEAD-TO-HEAD").
+
+### Em caso de dúvida
+Se não for óbvio, pergunte ao usuário antes de gerar o JSON:
+> "Esse vídeo apresenta cada produto separadamente (formato padrão) ou compara os dois
+> ao mesmo tempo, spec a spec (head-to-head)?"
+
+---
+
 ## ENTRADA
 - A **transcrição** da narração (texto). As frases-gatilho (`after_phrase`) DEVEM ser
   trechos **exatos e consecutivos** da narração, como foram falados/transcritos.
@@ -24,15 +54,38 @@ de imagem, as lower thirds, a recapitulação e os CTAs.
    `Text → ··· → Export transcript (.json)`). Crítico: as `after_phrase` precisam casar
    palavra a palavra com esse transcript. NÃO use só o roteiro escrito se ele diferir do
    falado (números por extenso, etc.).
-2. **A lista de produtos na ordem do vídeo**, com marca / nome / faixa de preço / folder. Ex:
+2. **A lista de produtos na ordem do vídeo**, normalmente neste formato:
    ```
-   1 → WAP / Serra Circular ESC 1500 / R$ 330–420
-   2 → Philco / Serra Circular PSC01 / R$ 360–430
-   3 → Bosch / Serra Circular GKS 150 / R$ 620–690
-   4 → Makita / Serra Circular 5007N / R$ 800–870
+   ✅1. TSSAPER TP550 (R$ 190,00 - R$ 200,00)
+   🛒Mercado Livre (127v/220v): https://meli.la/1KeU6Wx
+   🛒Shopee (127v/220v): https://s.shopee.com.br/2LVckU4VGE
+
+   ✅2. Black Tools Tpp21a (R$ 240,00 - R$ 270,00)
+   🛒Mercado Livre: https://meli.la/1wW8PP7
+   🛒Shopee: https://s.shopee.com.br/7fX96o0yIT
    ```
+   De cada item o agente extrai:
+   - **número** (`1`, `2`, …) → ordem do produto e `folder` (`"1"`, `"2"`, …).
+   - **nome** (ex: `"Black Tools Tpp21a"`) → vira `brand` + `name` exibidos no card.
+   - **faixa de preço** (ex: `R$ 240,00 - R$ 270,00`) → `price_min` / `price_max`.
+   - links 🛒 → **ignore** (não entram no JSON).
+
 CTAs de inscrição, recap final e specs (lower thirds) o agente detecta sozinho a partir
 da transcrição.
+
+> ⚠️ **NOME E PREÇO VÊM SEMPRE DESTA LISTA — NUNCA DA TRANSCRIÇÃO.** (vale pros DOIS formatos.)
+> A transcrição erra nomes próprios o tempo todo (ex: ouviu *"Black Tusk"* quando o produto
+> é *"Black Tools"*). Então:
+> - Campos **EXIBIDOS na tela** → `brand`, `name`, `price_min`, `price_max`: usam a grafia da **LISTA**.
+> - **Gatilhos de tempo** → `after_phrase`, `start_phrase`, `end_phrase`: continuam **literais da transcrição** (mesmo com o nome "errado"), senão o plugin não casa o tempo.
+>
+> **Normalize** a grafia do nome pra ficar bonito no card (ex: `"Tpp21a"` → `"TPP 21A"`,
+> marca em caixa quando fizer sentido) — **mantendo as palavras da lista**, sem inventar.
+> No fim, **liste no chat** as correções de nome que aplicou
+> (ex: *transcrição dizia "Black Tusk" → usei "Black Tools" da sua lista*).
+>
+> Specs numéricas das lower thirds (ex: "550W", "800ml") continuam vindo do conteúdo/transcrição
+> (não estão na lista) — use seu melhor julgamento.
 
 ## SAÍDA
 - **Somente** um objeto JSON válido (sem comentários, sem texto fora do JSON).
@@ -78,7 +131,10 @@ que foi **falado** na transcrição:
    - ❌ `"até 45°"` ✅ `"até 45 graus"`
 
 4. **Marcas/nomes próprios** podem aparecer fonéticos na transcrição.
-   - Se a transcrição escreveu `"a vape"` em vez de `"a WAP"`, use o que ESTÁ lá.
+   - No **`after_phrase`** (gatilho de tempo): use o que ESTÁ na transcrição, mesmo errado
+     (ex: `"a vape"` em vez de `"a WAP"`, ou `"Black Tusk"` em vez de `"Black Tools"`).
+   - No **nome EXIBIDO** (`brand`/`name`): use a grafia da **LISTA do usuário** (`"WAP"`,
+     `"Black Tools"`), NUNCA a fonética da transcrição. (ver regra ⚠️ na seção ENTRADA)
 
 > **REGRA SEM EXCEÇÃO:** a `after_phrase` é uma **busca textual literal** na transcrição.
 > Não é uma descrição do que foi dito, é uma **cópia** do que foi dito. Quando em dúvida,
@@ -115,11 +171,34 @@ Para CADA produto, a `timeline` é SEMPRE estes 5 itens, nesta ordem:
   "price_min": "R$ 330",
   "price_max": "R$ 420",
   "folder": "1",
+  "chapter_tag": "melhor custo-benefício",
   "image_prompts": [ "...", "...", "...", "...", "...", "...", "..." ],
   "timeline": [ ...os 5 itens acima... ],
   "lower_thirds": [ ... ]
 }
 ```
+
+### `chapter_tag` — Benefício do produto no capítulo
+
+Texto **curto** (até ~40 caracteres) que descreve o **posicionamento ou veredito** do produto —
+aparece como segunda linha de capítulo na aba Capítulos do plugin (o editor escolhe qual copiar).
+
+Preencha com base no que a narração diz sobre o papel daquele produto no comparativo:
+
+| Situação na narração | Exemplo de `chapter_tag` |
+|---|---|
+| O mais barato / entrada de gama | `"mais barato do comparativo"` |
+| Melhor custo-benefício | `"melhor custo-benefício"` |
+| Intermediário / boa relação | `"intermediário com diferenciais"` |
+| Top de linha / mais completo | `"top de linha"` |
+| Melhor para uso profissional | `"escolha profissional"` |
+| Melhor para uso doméstico | `"ideal para uso doméstico"` |
+| Mais leve / mais portátil | `"mais leve do grupo"` |
+
+- Baseie-se no **veredito que o locutor dá** ao final da descrição do produto ou na recap.
+- Se o produto for mencionado na `conclusion.recap`, use a mesma ideia: ex. recap diz
+  "a WAP ou a Philco resolve pra quem quer gastar menos" → `chapter_tag` da WAP = `"opção econômica"`.
+- Se a narração não deixar claro o posicionamento, omita o campo (o plugin usa só o nome).
 
 - `folder`: numeração sequencial em string — `"1"`, `"2"`, `"3"`, `"4"`... (ordem do vídeo).
 - `price_min` / `price_max`: formato `"R$ NNN"`.
@@ -235,9 +314,110 @@ meio e no fim do vídeo), adicione uma entrada com `after_phrase` distinta de ca
 
 ## CAMPOS OPCIONAIS (use só quando fizer sentido)
 
+- `product.chapter_tag`: veredito/posicionamento curto do produto (ver seção acima).
+  **Sempre preencha** quando a narração deixar clara a posição do produto no ranking.
 - `product.chapter_title`: título custom do capítulo daquele produto (default = marca + nome).
 - `product.cta_before` (`true`): marque no produto que vem **logo depois** de um CTA, para o
   capítulo dele começar no início do CTA (assim quem pula pro produto não perde o CTA).
+- `product.cursor_reset` (`true`): **use no modo head-to-head**. Reseta o cursor de busca de frases
+  para 0 antes de processar esse produto. Necessário quando as frases do produto aparecem
+  intercaladas com as do anterior na transcrição (ex: p1 PRECO está em 263s mas p2 PRODUTO
+  está em 24s — sem `cursor_reset`, a busca de p2 começa em 263s e não encontra a frase).
+
+---
+
+## MODO HEAD-TO-HEAD: `global_fill`
+
+Use quando o vídeo **compara dois produtos spec a spec** (sem o padrão "apresenta P1 → preço P1 → apresenta P2 → preço P2"). Nesse formato, o plugin preenche a faixa de comparação com os vídeos/imagens dos dois produtos.
+
+> ⚠️ **IMPORTANTE — use SEMPRE `segments` (não `mode: interleaved`).** A narração de um head-to-head fala em BLOCOS (ex: ~13s só da Black, depois ~12s só da DECO, depois compara). O modo `interleaved` antigo alterna cego a cada 5s e NUNCA bate com a fala (mostra DECO enquanto narra a Black). Os `segments` amarram cada trecho à frase dita → vídeo sincronizado com a narração. O `interleaved` só existe por compatibilidade.
+
+### Quando usar
+- Narração alterna entre os dois produtos ao longo do vídeo ("A Black Tusk tem X… já a DECO tem Y…")
+- Não há o padrão sequencial "introdução P1 → preço P1 → introdução P2 → preço P2"
+
+### Como montar os `segments` (passo a passo)
+1. Leia a transcrição e marque **cada vez que a narração troca de produto** (ou começa a comparar os dois).
+2. Para cada troca, crie um segmento com a **frase exata** onde aquele trecho começa e qual pasta mostrar.
+3. Um segmento vale **da sua frase até a frase do próximo segmento**.
+4. `folders` com 1 pasta = mostra só ela; com 2 pastas = intercala as duas DENTRO daquele trecho (use quando a narração compara os dois rapidamente, ex: "ambas geram névoa").
+5. `end_phrase` marca onde todo o preenchimento para (final do vídeo).
+6. Capriche: quanto mais segmentos (um por troca de assunto), mais sincronizado fica. É normal ter 10–20 segmentos num comparativo.
+
+### Estrutura
+
+```json
+{
+  "products": [
+    {
+      "brand": "Black Tusk vs DECO",
+      "name": "Pistola de Pintura",
+      "price_min": "R$ XXX",
+      "price_max": "R$ YYY",
+      "folder": "1",
+      "chapter_tag": "sem fio vs com fio",
+      "timeline": [
+        { "after_phrase": "<intro do comparativo>", "type": "template_insert", "template": "TRANSICAO_2", "anchor": "marker", "offset_seconds": 0, "track": 5 },
+        { "after_phrase": "<intro do comparativo>", "type": "template_insert", "template": "PRODUTO", "track": 1 },
+        { "after_phrase": "<intro do comparativo>", "type": "template_insert", "template": "TRANSICAO_1", "anchor": "marker", "offset_seconds": 5, "track": 5 },
+        { "after_phrase": "<frase do preço no final>", "type": "template_insert", "template": "TRANSICAO_1", "anchor": "marker", "offset_seconds": 0, "track": 5 },
+        { "after_phrase": "<frase do preço no final>", "type": "template_insert", "template": "PRECO", "track": 1 }
+      ],
+      "lower_thirds": [ ... ]
+    }
+  ],
+  "global_fill": {
+    "slot_duration": 5,
+    "track": 1,
+    "end_phrase": "<frase onde o preenchimento para, no final>",
+    "segments": [
+      { "start_phrase": "<frase onde começa a falar do produto A>", "folders": ["1"] },
+      { "start_phrase": "<frase onde começa a falar do produto B>", "folders": ["2"] },
+      { "start_phrase": "<frase onde volta pro produto A>", "folders": ["1"] },
+      { "start_phrase": "<frase onde compara os dois rapidamente>", "folders": ["1", "2"] }
+    ]
+  },
+  "conclusion": { ... },
+  "key_points": [ ... ]
+}
+```
+
+### Campos do `global_fill`
+
+| Campo | Obrigatório | Descrição |
+|---|---|---|
+| `segments` | ✅ (recomendado) | Lista ordenada de trechos. Cada um: `start_phrase` (frase exata da transcrição) + `folders` (1 pasta = só ela; 2 = intercala). Vale até o próximo segmento. **É o que sincroniza com a narração.** |
+| `end_phrase` | recomendado | Frase onde TODO o preenchimento para. Se omitido, vai até o fim da transcrição. |
+| `slot_duration` | opcional | Duração de cada slot em segundos (padrão: 5). |
+| `track` | opcional | Track de vídeo (padrão: 1). |
+| `folders` | legado | Só no modo `interleaved` antigo (alternância cega). **Não use com `segments`.** |
+| `mode`/`start_phrase` | legado | Apenas modo `interleaved`. Ignore no modo `segments`. |
+
+> O auto-fill por produto e o pós-preço são **automaticamente desligados** quando há `global_fill` — ele vira o único preenchedor da faixa, sem colisão.
+
+### Estratégia de bins
+
+**Opção A — 2 bins separados** (recomendado):
+- `PROD_1`: 7 fotos do produto A
+- `PROD_2`: 7 fotos do produto B
+- O plugin alterna automaticamente: 5s P1 → 5s P2 → 5s P1 → ...
+
+**Opção B — 1 bin único** (mais simples, sem alternância):
+- `PROD_1`: 7 fotos P1 + 7 fotos P2 (14 no total)
+- Use só `"folders": ["1"]` no global_fill
+
+### Lower thirds no head-to-head
+
+Coloque os dois valores numa mesma lower third quando ditos na mesma frase:
+```json
+{ "after_phrase": "1000 mililitros contra 800", "info": "reservatório", "sub_info": "A: 1000ml • B: 800ml" }
+```
+
+Se ditos em momentos separados, crie duas lower thirds distintas (uma pra cada).
+
+### Compatibilidade
+
+O `global_fill` é **totalmente aditivo** — o modo padrão (produto por produto) continua funcionando exatamente igual. Os dois podem até coexistir no mesmo JSON se necessário.
 
 > O plugin gera sozinho os capítulos do YouTube e os marcadores — você NÃO precisa criar
 > capítulos, só (opcionalmente) `conclusion.title`, `chapter_title` e `cta_before`.
@@ -258,6 +438,7 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
       "price_min": "R$ 330",
       "price_max": "R$ 420",
       "folder": "1",
+      "chapter_tag": "opção econômica",
       "image_prompts": [
         "circular saw cutting a wooden plank on a workbench, sawdust flying, woodshop environment, side angle action shot",
         "circular saw resting on a stack of fresh lumber at a construction site, morning sunlight, wide composition",
@@ -312,9 +493,12 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 > só para indicar onde entram os outros produtos. Entregue JSON puro.
 
 ## CHECKLIST ANTES DE ENTREGAR
-1. JSON válido, só o objeto (nada fora dele).
-2. 1 produto por item, com os 5 itens FIXOS de timeline (TRANSICAO_2, PRODUTO, TRANSICAO_1+5, TRANSICAO_1+0, PRECO).
-3. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
-4. Exatamente 7 `image_prompts` em inglês por produto.
-5. Lower thirds nos specs (curtas), recap se houver, key_points pra cada CTA.
-6. `folder` sequencial "1","2",...; preços "R$ NNN".
+1. **Formato identificado** — sequencial (padrão) ou head-to-head (`global_fill`)?
+2. JSON válido, só o objeto (nada fora dele).
+3. **Sequencial:** 1 produto por item, com os 5 itens FIXOS de timeline. **Head-to-head:** `global_fill` presente com `segments` (sincronizados à narração — NÃO use `interleaved`), produto "container" com os 5 itens FIXOS para o card de intro/preço.
+4. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
+   - **`brand`/`name`/`price_min`/`price_max` vêm da LISTA do usuário** (grafia normalizada), **não** da transcrição. Gatilhos (`after_phrase` etc.) seguem a transcrição literal.
+5. Exatamente 7 `image_prompts` em inglês por produto (sequencial) ou por produto do confronto (head-to-head).
+6. Lower thirds nos specs (curtas), recap se houver, key_points pra cada CTA.
+7. `folder` sequencial "1","2",...; preços "R$ NNN".
+8. `chapter_tag` preenchido em **cada produto** onde a narração deixa claro o posicionamento.

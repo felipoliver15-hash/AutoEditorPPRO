@@ -4372,6 +4372,25 @@ function insertTemplate(templateName, trackIndex, startSec, product, extras) {
 
         track.overwriteClip(seqItem, startTime);
 
+        // DIAGNÓSTICO: confirma ONDE o clip aninhado caiu de fato (start real na
+        // timeline). Ajuda a depurar casos como o PRECO "não localizado" pelo stretch.
+        try {
+            var _tgt = parseFloat(startTime.ticks), _best = null, _bd = Infinity;
+            for (var _c = 0; _c < track.clips.numItems; _c++) {
+                var _cc = track.clips[_c];
+                if (!_cc || !_cc.start) continue;
+                var _dd = Math.abs(parseFloat(_cc.start.ticks) - _tgt);
+                if (_dd < _bd) { _bd = _dd; _best = _cc; }
+            }
+            if (_best) {
+                var _bs = parseFloat(_best.start.ticks) / TICKS_PER_SECOND;
+                var _be = parseFloat(_best.end.ticks) / TICKS_PER_SECOND;
+                updateLog.push("PLACE: '" + seqItemRef + "' alvo=" + startSec.toFixed(2) + "s → caiu em [" + _bs.toFixed(2) + "→" + _be.toFixed(2) + "]s (track V" + (trackIndex + 1) + ")");
+            } else {
+                updateLog.push("PLACE: '" + seqItemRef + "' alvo=" + startSec.toFixed(2) + "s → NENHUM clip achado na track após overwriteClip!");
+            }
+        } catch (ePl) {}
+
         return JSON.stringify({ success: true, updateLog: updateLog });
     } catch (e) {
         return JSON.stringify({ error: e.message, updateLog: updateLog });
@@ -4480,7 +4499,8 @@ function buildChaptersList(products, precoDur, conclusionTitle) {
         } else {
             time = productStart(prod);
         }
-        if (time !== null && time !== undefined) chaps.push({ time: time, title: title });
+        var tag = prod.chapter_tag || "";
+        if (time !== null && time !== undefined) chaps.push({ time: time, title: title, tag: tag });
     }
 
     // Conclusão: fim do preço do último produto que tenha PRECO resolvido.
@@ -4490,7 +4510,7 @@ function buildChaptersList(products, precoDur, conclusionTitle) {
             lastEnd = productPrecoEnd(products[q]);
         }
         if (lastEnd !== null) {
-            chaps.push({ time: lastEnd, title: conclusionTitle || "Conclusão" });
+            chaps.push({ time: lastEnd, title: conclusionTitle || "Conclusão", tag: "" });
         }
     }
 
@@ -4536,8 +4556,11 @@ function getChaptersFromMarkers() {
             try { t = parseFloat(m.start.ticks) / TICKS_PER_SECOND; } catch (eT) {}
             var title = "";
             try { title = m.name || ""; } catch (eN) {}
-            if (!title) { try { title = m.comments || ""; } catch (eC) {} }
-            chaps.push({ time: t, title: title });
+            var tag = "";
+            try { tag = m.comments || ""; } catch (eC) {}
+            // Se não havia name, o antigo código guardava o título em comments — detectar.
+            if (!title && tag) { title = tag; tag = ""; }
+            chaps.push({ time: t, title: title, tag: tag });
             var next = null;
             try { next = seq.markers.getNextMarker(m); } catch (eNx) {}
             m = next;
@@ -4652,16 +4675,38 @@ function muteInsertedAudio(seq, name, startSec) {
     try {
         var target = String(name || "").toUpperCase();
         var startTicks = startSec * TICKS_PER_SECOND;
+        // Itera ao contrário pra poder remover sem deslocar índices.
         for (var t = 0; t < seq.audioTracks.numTracks; t++) {
             var tr = seq.audioTracks[t];
-            for (var c = 0; c < tr.clips.numItems; c++) {
+            for (var c = tr.clips.numItems - 1; c >= 0; c--) {
                 var clp = tr.clips[c];
                 var nm = ""; try { nm = (clp.name || "").toUpperCase(); } catch (eN) { continue; }
                 var cs = 0; try { cs = parseFloat(clp.start.ticks); } catch (eS) { continue; }
-                if (Math.abs(cs - startTicks) < 0.6 * TICKS_PER_SECOND &&
+                if (Math.abs(cs - startTicks) < 1.5 * TICKS_PER_SECOND &&
                     (nm === target || (target && nm.indexOf(target) >= 0))) {
-                    try { clp.disabled = true; } catch (eD) {}   // muta
-                    try { clp.remove(false, false); } catch (eR) {} // tenta remover de fato
+                    try { clp.disabled = true; } catch (eD) {}
+                    // Tenta remover: remove(false=no-ripple, false=no-ripple-all-tracks)
+                    var removed = false;
+                    try { clp.remove(false, false); removed = true; } catch (eR) {}
+                    // Fallback QE se remove() falhou
+                    if (!removed) {
+                        try {
+                            app.enableQE();
+                            var qeSeq = qe.project.getActiveSequence();
+                            if (qeSeq) {
+                                var qeAT = qeSeq.getAudioTrackAt(t);
+                                if (qeAT) {
+                                    for (var qi = qeAT.numItems - 1; qi >= 0; qi--) {
+                                        var qeClip = qeAT.getItemAt(qi);
+                                        if (qeClip && Math.abs(parseFloat(qeClip.start.ticks || 0) - startTicks) < 1.5 * TICKS_PER_SECOND) {
+                                            try { qeClip.remove(false, false); } catch (eQR) {}
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (eQE) {}
+                    }
                 }
             }
         }
@@ -4677,7 +4722,7 @@ function muteInsertedAudio(seq, name, startSec) {
 //    e sem blur — esse é o foreground.
 // O resultado é o vídeo cheio visível em cima de uma versão borrada cobrindo o frame todo.
 // Só aplica em vídeo (forceExact=false). Se W/H >= 1.2 considera landscape e pula.
-function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes) {
+function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes, inOffsetSec, forceLayered) {
     var info = { applied: false, log: [] };
     try {
         if (!sfRes || !sfRes.srcW || !sfRes.srcH || !sfRes.seqW || !sfRes.seqH) {
@@ -4685,9 +4730,17 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
         }
         var srcW = sfRes.srcW, srcH = sfRes.srcH;
         var seqW = sfRes.seqW, seqH = sfRes.seqH;
-        if (srcW >= srcH * 1.2) { info.log.push("landscape (" + srcW + "x" + srcH + ") — skipped"); return info; }
-
-        info.log.push("vertical/quadrado " + srcW + "x" + srcH);
+        var isLandscape = (srcW >= srcH * 1.2);
+        // No modo padrão, landscape não ganha fundo borrado (preenche o quadro).
+        // No global_fill (forceLayered), TODO slot vira 2 camadas (blur embaixo +
+        // FIT em cima) — mesmo landscape — pra que cada overwriteClip limpe as
+        // duas tracks e não sobre clipe órfão/preto do slot anterior.
+        if (isLandscape && !forceLayered) {
+            info.log.push("landscape (" + srcW + "x" + srcH + ") — skipped"); return info;
+        }
+        info.log.push(isLandscape
+            ? ("landscape " + srcW + "x" + srcH + " — layered (global_fill)")
+            : ("vertical/quadrado " + srcW + "x" + srcH));
 
         // ── 1. Acha o clip original (com FILL scale já aplicado).
         var origTrack = seq.videoTracks[trackIndex];
@@ -4758,18 +4811,33 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
             } catch (eBlur) { info.log.push("setBlur err: " + eBlur.message); }
         }
 
-        // ── 4. Duplica clip na track ACIMA (track+1).
+        // ── 4. Duplica clip na track ACIMA (track+1). Com verificação + retry:
+        // o overwriteClip às vezes falha silenciosamente num slot e o clip de cima
+        // não é criado, deixando só o blur de baixo na tela. Só aceitamos o clip
+        // se ele realmente caiu perto do start (senão pegaríamos o slot anterior).
         var topTrackIdx = trackIndex + 1;
         var topTrack = ensureVideoTrack(seq, topTrackIdx);
-        topTrack.overwriteClip(item, startT);
-
-        var topClip = null, bestDD2 = Infinity;
-        for (var tc = 0; tc < topTrack.clips.numItems; tc++) {
-            var tcc = topTrack.clips[tc];
-            if (!tcc || !tcc.start) continue;
-            var dd2 = Math.abs(parseFloat(tcc.start.ticks) - targetTicks);
-            if (dd2 < bestDD2) { bestDD2 = dd2; topClip = tcc; }
+        var topClip = null;
+        var topTol = TICKS_PER_SECOND * 0.3; // ~0.3s de tolerância
+        for (var attempt = 0; attempt < 3 && !topClip; attempt++) {
+            try { topTrack.overwriteClip(item, startT); }
+            catch (eOv) { info.log.push("top overwrite err: " + eOv.message); }
+            var bestDD2 = Infinity, cand2 = null;
+            for (var tc = 0; tc < topTrack.clips.numItems; tc++) {
+                var tcc = topTrack.clips[tc];
+                if (!tcc || !tcc.start) continue;
+                var dd2 = Math.abs(parseFloat(tcc.start.ticks) - targetTicks);
+                if (dd2 < bestDD2) { bestDD2 = dd2; cand2 = tcc; }
+            }
+            if (cand2 && bestDD2 < topTol) topClip = cand2; // só aceita se caiu no lugar
         }
+        if (!topClip) info.log.push("⚠ top NÃO criado após 3 tentativas (só blur de baixo) @ " + startSec.toFixed(1) + "s");
+
+        // OBS: o recorte da fonte (global_fill) já foi aplicado no projectItem
+        // em insertBinClipAtTime ANTES deste overwriteClip — a camada de cima
+        // herda a mesma janela automaticamente, então não mexemos no .inPoint
+        // do clip aqui (setter de clip já inserido não muda o frame exibido).
+        if (inOffsetSec > 0) { info.log.push("top src-window herdada (in=" + inOffsetSec.toFixed(1) + "s)"); }
 
         // Trim mesmo end (espelha duração do original).
         if (topClip && durationSec > 0) {
@@ -4826,21 +4894,82 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
     }
 }
 
-function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH, forceExact) {
+// inOffsetSec: offset em segundos dentro do vídeo fonte (global_fill).
+// Quando > 0, mostra a janela [inOffsetSec, inOffsetSec+durationSec] do vídeo —
+// trecho diferente a cada reutilização. IMPORTANTE: o recorte é feito no
+// projectItem (setInPoint/setOutPoint) ANTES do overwriteClip, porque mexer no
+// .inPoint do clip JÁ inserido na timeline não muda o frame exibido no Premiere.
+function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH, forceExact, itemPath, inOffsetSec, forceLayered) {
     try {
         var seq = app.project.activeSequence;
-        var item = findProjectItem(name) || findVideoBinItem(name);
+        // Usa o caminho completo quando disponível — evita confundir arquivos de nome
+        // igual em bins diferentes (ex: PROD_1/gen_1.jpg vs PROD_4/gen_1.jpg).
+        var item = (itemPath ? findProjectItemByPath(itemPath) : null) ||
+                   findProjectItem(name) || findVideoBinItem(name);
         if (!item) return JSON.stringify({ error: "Bin clip não encontrado: " + name });
         var track = ensureVideoTrack(seq, trackIndex);
         var startTime = new Time(); startTime.ticks = toTicks(startSec);
-        track.overwriteClip(item, startTime);
-        // acha o clip recém-inserido (mais próximo do start)
-        var bestClip = null, bestDD = Infinity, targetT = parseFloat(startTime.ticks);
-        for (var c = 0; c < track.clips.numItems; c++) {
-            var cc = track.clips[c];
-            if (!cc || !cc.start) continue;
-            var dd = Math.abs(parseFloat(cc.start.ticks) - targetT);
-            if (dd < bestDD) { bestDD = dd; bestClip = cc; }
+
+        // ── RECORTE DA FONTE (global_fill): janela [in, in+dur] no projectItem.
+        // O item é compartilhado entre todos os slots; salvamos o range original
+        // pra restaurar no fim e não corromper outras inserções do mesmo vídeo.
+        // Fica ativo durante o overwriteClip de baixo E o da camada de cima
+        // (applyBlurredBackgroundEffect), então as DUAS camadas mostram a mesma
+        // janela e ficam alinhadas.
+        var _piSaved = null, _winLog = null;
+        if (!forceExact && inOffsetSec > 0 && durationSec > 0) {
+            try {
+                // mediaType 4 = todas as mídias (vídeo+áudio); tempo em segundos.
+                var gi = item.getInPoint(), go = item.getOutPoint();
+                _piSaved = {
+                    inS: parseFloat(gi.ticks) / TICKS_PER_SECOND,
+                    outS: parseFloat(go.ticks) / TICKS_PER_SECOND,
+                    unit: "sec"
+                };
+                var winIn = inOffsetSec;
+                var winOut = inOffsetSec + durationSec;
+                // Não deixa a janela passar do fim da mídia (offset+dur > duração):
+                // recua a janela pra caber e evitar clip curto / vácuo na timeline.
+                var mediaOut = _piSaved.outS; // out original ≈ duração total da fonte
+                if (mediaOut > 0 && winOut > mediaOut) {
+                    winOut = mediaOut;
+                    winIn = (mediaOut - durationSec > 0) ? (mediaOut - durationSec) : 0;
+                }
+                item.setInPoint(winIn, 4);
+                item.setOutPoint(winOut, 4);
+                // Verifica se a API interpretou em SEGUNDOS (param ambíguo na doc).
+                // Se o readback não bater, refaz passando TICKS — auto-corrige
+                // independente da versão do Premiere.
+                var chkOut = parseFloat(item.getOutPoint().ticks) / TICKS_PER_SECOND;
+                if (Math.abs(chkOut - winOut) > 0.5) {
+                    item.setInPoint(Math.round(winIn * TICKS_PER_SECOND), 4);
+                    item.setOutPoint(Math.round(winOut * TICKS_PER_SECOND), 4);
+                    _piSaved.unit = "ticks";
+                    var chkOut2 = parseFloat(item.getOutPoint().ticks) / TICKS_PER_SECOND;
+                    _winLog = "src-window(ticks) [" + winIn.toFixed(1) + "→" + winOut.toFixed(1) + "]s readback=" + chkOut2.toFixed(1);
+                } else {
+                    _winLog = "src-window(sec) [" + winIn.toFixed(1) + "→" + winOut.toFixed(1) + "]s readback=" + chkOut.toFixed(1);
+                }
+            } catch (ePI) { _piSaved = null; _winLog = "src-window ERR: " + ePI.message; }
+        }
+
+        // Insere o clip COM verificação + retry: o overwriteClip às vezes falha
+        // silenciosamente num slot e a faixa fica vazia ali (gap de segundos).
+        // Só aceitamos o clip se ele caiu PERTO do start (senão pegaríamos o slot
+        // anterior por proximidade e ainda aplicaríamos blur no clip errado).
+        var targetT = parseFloat(startTime.ticks);
+        var botTol = TICKS_PER_SECOND * 0.3; // ~0.3s de tolerância
+        var bestClip = null;
+        for (var attempt = 0; attempt < 3 && !bestClip; attempt++) {
+            try { track.overwriteClip(item, startTime); } catch (eOvB) {}
+            var bestDD = Infinity, candB = null;
+            for (var c = 0; c < track.clips.numItems; c++) {
+                var cc = track.clips[c];
+                if (!cc || !cc.start) continue;
+                var dd = Math.abs(parseFloat(cc.start.ticks) - targetT);
+                if (dd < bestDD) { bestDD = dd; candB = cc; }
+            }
+            if (candB && bestDD < botTol) bestClip = candB; // só aceita se caiu no lugar
         }
         if (bestClip && durationSec > 0) {
             try {
@@ -4848,26 +4977,68 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
                 var wantEnd = startSec + durationSec;
                 // forceExact (imagem): seta sempre. Vídeo: só corta se passar da janela.
                 if (forceExact || natEnd > wantEnd + 0.04) {
-                    var et = new Time(); et.ticks = toTicks(wantEnd);
-                    bestClip.end = et;
+                    var et0 = new Time(); et0.ticks = toTicks(wantEnd);
+                    bestClip.end = et0;
                 }
-            } catch (eTrim) {}
+            } catch (eTrim0) {}
+        }
+        if (!bestClip) {
+            // falhou em colocar o clip — restaura janela e retorna erro claro
+            if (_piSaved) {
+                try {
+                    if (_piSaved.unit === "ticks") { item.setInPoint(Math.round(_piSaved.inS * TICKS_PER_SECOND), 4); item.setOutPoint(Math.round(_piSaved.outS * TICKS_PER_SECOND), 4); }
+                    else { item.setInPoint(_piSaved.inS, 4); item.setOutPoint(_piSaved.outS, 4); }
+                } catch (eRf) {}
+            }
+            return JSON.stringify({ error: "overwriteClip não posicionou o clip @ " + startSec.toFixed(1) + "s (após 3 tentativas)" });
         }
         // Remove o áudio (só relevante pra vídeo; imagem não tem).
         muteInsertedAudio(seq, item.name, startSec);
+
+        // Duração real do clip inserido (respeitando IN/OUT do project item).
+        var actualEnd = startSec;
+        if (bestClip) {
+            try { actualEnd = parseFloat(bestClip.end.ticks) / TICKS_PER_SECOND; } catch (eAE) {}
+        }
 
         var sfRes = null;
         try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH); } catch (eSF) {}
 
         // Efeito de fundo borrado pra vídeos verticais/quadrados (não pra imagens).
+        // (projectItem ainda está recortado aqui → camada de cima herda a janela.)
         var blurBg = null;
         if (!forceExact) {
-            try { blurBg = applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes); }
+            try { blurBg = applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes, inOffsetSec || 0, forceLayered); }
             catch (eBg) { blurBg = { applied: false, log: ["exception: " + eBg.message] }; }
+            if (blurBg && _winLog) { try { blurBg.log.push(_winLog); } catch (eL) {} }
         }
 
-        return JSON.stringify({ success: true, scaleToFrame: sfRes, blurBg: blurBg });
+        // Restaura o range original do projectItem (não afeta clips já inseridos).
+        if (_piSaved) {
+            try {
+                if (_piSaved.unit === "ticks") {
+                    item.setInPoint(Math.round(_piSaved.inS * TICKS_PER_SECOND), 4); item.setOutPoint(Math.round(_piSaved.outS * TICKS_PER_SECOND), 4);
+                } else {
+                    item.setInPoint(_piSaved.inS, 4); item.setOutPoint(_piSaved.outS, 4);
+                }
+            } catch (eR1) {}
+        }
+
+        return JSON.stringify({ success: true, actual_end: actualEnd, scaleToFrame: sfRes, blurBg: blurBg });
     } catch (e) {
+        // Restaura o range do projectItem mesmo em erro (item é compartilhado
+        // entre slots — não pode ficar recortado pra próxima inserção).
+        try {
+            if (typeof _piSaved !== "undefined" && _piSaved && item) {
+                try {
+                    if (_piSaved.unit === "ticks") {
+                        item.setInPoint(Math.round(_piSaved.inS * TICKS_PER_SECOND), 4); item.setOutPoint(Math.round(_piSaved.outS * TICKS_PER_SECOND), 4);
+                    } else {
+                        item.setInPoint(_piSaved.inS, 4); item.setOutPoint(_piSaved.outS, 4);
+                    }
+                } catch (eRc1) {}
+            }
+        } catch (eRcAll) {}
         return JSON.stringify({ error: e.message });
     }
 }
@@ -4901,10 +5072,10 @@ function getProductBinMedia(foldersJSON) {
                 var isRef = (stripExt(nm).toLowerCase() === "png");
                 if (IEXT[e]) {
                     if (isRef && ref === null) ref = mp;     // referência (não vira b-roll)
-                    else images.push({ name: nm });
+                    else images.push({ name: nm, path: mp || "" });
                 } else if (VEXT[e]) {
                     var d = projectItemMediaDuration(it);
-                    videos.push({ name: nm, dur: d }); vtotal += d;
+                    videos.push({ name: nm, path: mp || "", dur: d }); vtotal += d;
                 }
                 // outros (sequências, áudio, sub-bins) são ignorados
             }
@@ -5146,6 +5317,53 @@ function findClipByNameNearStart(seq, nameSub, startSec, tolSec) {
 // Estica o clip do PRECO de cada produto até o início do próximo produto, fechando
 // o buraco causado pela narração entre o fim do preço e a intro seguinte. O limite
 // é o conteúdo interno do template PRECO (a reserva). Só ESTENDE (nunca encurta).
+// Corta cada LOWERTHIRD no INÍCIO do próximo PRECO (o "limite" da transição), pra
+// nenhuma lower third invadir o card de preço. Usa a duração REAL do clip na timeline
+// (a LOWERTHIRD é colocada na duração natural do masterclip, que difere do `duration`
+// do JSON — por isso o clamp pré-posicionamento não bastava).
+function clampLowerThirdsToPrice(seq, products) {
+    var log = [];
+    try {
+        function itemTime(it) { return (it.time_seconds == null) ? null : it.time_seconds + (it.offset_seconds ? it.offset_seconds : 0); }
+        var precoStarts = [];
+        for (var p = 0; p < products.length; p++) {
+            var pit = products[p].timeline || [];
+            for (var i = 0; i < pit.length; i++) {
+                if ((pit[i].template || "").toUpperCase() === "PRECO") {
+                    var t = itemTime(pit[i]); if (t != null) precoStarts.push(t);
+                }
+            }
+        }
+        precoStarts.sort(function (a, b) { return a - b; });
+        if (!precoStarts.length) return log;
+
+        var cut = 0;
+        for (var tk = 0; tk < seq.videoTracks.numTracks; tk++) {
+            var tr = seq.videoTracks[tk];
+            for (var c = 0; c < tr.clips.numItems; c++) {
+                var clp = tr.clips[c];
+                var nm = ""; try { nm = (clp.name || "").toUpperCase(); } catch (eN) {}
+                if (nm.indexOf("LOWERTHIRD") < 0) continue;
+                var cs, ce;
+                try { cs = parseFloat(clp.start.ticks) / TICKS_PER_SECOND; ce = parseFloat(clp.end.ticks) / TICKS_PER_SECOND; }
+                catch (eS) { continue; }
+                // próximo PRECO depois do início desta lower third
+                var bound = null;
+                for (var k = 0; k < precoStarts.length; k++) { if (precoStarts[k] > cs + 0.05) { bound = precoStarts[k]; break; } }
+                if (bound != null && ce > bound + 0.04) {
+                    try {
+                        var et = new Time(); et.ticks = toTicks(bound);
+                        clp.end = et; cut++;
+                        log.push("LT @" + cs.toFixed(1) + "s: fim " + ce.toFixed(1) + "s → cortado em " + bound.toFixed(1) + "s (limite do preço)");
+                    } catch (eC) {}
+                }
+            }
+        }
+        if (cut) log.unshift(cut + " lower third(s) cortada(s) no limite do preço");
+    } catch (e) { log.push("erro: " + e.message); }
+    return log;
+}
+
 function stretchPrecoToNextProduct(seq, products, ctaStarts) {
     var log = [];
     try {
@@ -5163,7 +5381,7 @@ function stretchPrecoToNextProduct(seq, products, ctaStarts) {
             return best;
         }
 
-        for (var p = 0; p < products.length - 1; p++) {
+        for (var p = 0; p < products.length; p++) {   // inclui o ÚLTIMO produto
             // PRECO deste produto
             var precoSec = null;
             var pit = products[p].timeline || [];
@@ -5174,17 +5392,40 @@ function stretchPrecoToNextProduct(seq, products, ctaStarts) {
 
             // Início do PRÓXIMO produto = card PRODUTO seguinte
             var nextStart = null;
-            var nit = products[p + 1].timeline || [];
-            for (var j = 0; j < nit.length; j++) {
-                if ((nit[j].template || "").toUpperCase() === "PRODUTO") {
-                    var ns = itemTime(nit[j]);
-                    if (ns != null && (nextStart === null || ns < nextStart)) nextStart = ns;
+            if (p + 1 < products.length) {
+                var nit = products[p + 1].timeline || [];
+                for (var j = 0; j < nit.length; j++) {
+                    if ((nit[j].template || "").toUpperCase() === "PRODUTO") {
+                        var ns = itemTime(nit[j]);
+                        if (ns != null && (nextStart === null || ns < nextStart)) nextStart = ns;
+                    }
                 }
             }
-            if (nextStart === null) continue;
+            // ÚLTIMO produto (ou sem próximo PRODUTO): não há "próximo" pra limitar.
+            // Usa um limite grande → o CTA seguinte (se houver) ou o teto do conteúdo
+            // do PRECO é que vão limitar o esticamento. Antes o último era PULADO,
+            // então o preço dele ficava cortado na duração fixa do template.
+            if (nextStart === null) nextStart = precoSec + precoContentDur + 600;
 
             var clip = findClipByNameNearStart(seq, "PRECO", precoSec, 0.6);
-            if (!clip) { log.push("p" + (p + 1) + ": clip PRECO não localizado @ " + precoSec.toFixed(2) + "s"); continue; }
+            if (!clip) {
+                // DIAGNÓSTICO: lista todos os clips "PRECO" presentes agora, com start.
+                var _found = [];
+                try {
+                    for (var _t = 0; _t < seq.videoTracks.numTracks; _t++) {
+                        var _tr = seq.videoTracks[_t];
+                        for (var _c = 0; _c < _tr.clips.numItems; _c++) {
+                            var _nm = ""; try { _nm = (_tr.clips[_c].name || "").toUpperCase(); } catch (e1) {}
+                            if (_nm.indexOf("PRECO") >= 0) {
+                                var _s = parseFloat(_tr.clips[_c].start.ticks) / TICKS_PER_SECOND;
+                                _found.push("V" + (_t + 1) + "@" + _s.toFixed(2) + "s");
+                            }
+                        }
+                    }
+                } catch (eDg) {}
+                log.push("p" + (p + 1) + ": clip PRECO não localizado @ " + precoSec.toFixed(2) + "s — PRECOs na timeline: [" + _found.join(", ") + "]");
+                continue;
+            }
 
             var curEndSec = 0;
             try { curEndSec = parseFloat(clip.end.ticks) / TICKS_PER_SECOND; } catch (eCe) {}
@@ -5313,6 +5554,9 @@ function mountFromJSON(jsonString) {
         var seq  = app.project.activeSequence;
         if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
 
+        // Limpa marcadores antes da montagem para evitar duplicatas ao remontar.
+        clearSequenceMarkers(seq);
+
         // Reset da track de SFX — cada mount resolve uma track nova de SFX
         // (criada no final) e reusa pra todas as transições.
         _sfxAudioTrackIdx = -1;
@@ -5387,6 +5631,11 @@ function mountFromJSON(jsonString) {
                 }
             })();
 
+            // Cursor corrido de vídeo por track: compensa quando getOutPoint() retorna a
+            // duração TOTAL da mídia mas overwriteClip() insere só o trecho IN→OUT (menor).
+            // Sem isso, o cursor JS fica maior que o clip real → vácuos na timeline.
+            var _vidEnd = {}; // trackIdx → tempo real de fim do último product_video
+
             for (var i = 0; i < items.length; i++) {
                 var item = items[i];
 
@@ -5400,6 +5649,12 @@ function mountFromJSON(jsonString) {
                 var animation = item.animation || "zoom_in";
                 var r;
 
+                // Qualquer item que NÃO é vídeo de produto (ex: card PRECO/PRODUTO)
+                // QUEBRA a "corrente" de vídeos naquela track → zera o cursor _vidEnd.
+                // Sem isso, o vídeo seguinte (ex: pós-preço planejado lá na frente) era
+                // "puxado pra trás" até o fim do último vídeo e SOBRESCREVIA o card.
+                if (item.type !== "product_video") { _vidEnd[trackIdx] = undefined; }
+
                 // offset_seconds: fine-tune universal do ponto de inserção.
                 // Negativo = insere mais cedo (útil pra transições e ajustes
                 // finos de timing sem mexer no transcript).
@@ -5411,12 +5666,27 @@ function mountFromJSON(jsonString) {
 
                 try {
                     if (item.type === "product_video") {
+                        // _globalfill: posição planejada com slot fixo — não corrigir via _vidEnd
+                        // (itens do produto virtual sobrescrevem diretamente sem depender do cursor).
+                        if (!item._globalfill) {
+                            // Corrige o start: se o cursor JS estava errado (overwriteClip insere
+                            // trecho IN→OUT, menor que lvdur usado p/ avançar o cursor), o clip
+                            // anterior terminou ANTES do startSec planejado → vácuo.
+                            var prevEnd = _vidEnd[trackIdx];
+                            if (prevEnd !== undefined && prevEnd <= startSec + 0.1) {
+                                startSec = prevEnd;
+                            }
+                        }
                         // Vídeo do produto (bin PROD_N) — insere por nome, corta na duração, sem áudio.
-                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, false));
+                        // Para global_fill, passa in_offset para mostrar trecho diferente a cada slot.
+                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, false, item.bin_path || null, item.in_offset || 0, !!item._globalfill));
+                        if (r && r.success && r.actual_end != null && !item._globalfill) {
+                            _vidEnd[trackIdx] = r.actual_end;
+                        }
 
                     } else if (item.bin_name) {
                         // Imagem vinda do bin PROD_N (modelo novo) — insere por nome, duração exata.
-                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, true));
+                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, true, item.bin_path || null));
 
                     } else if (item.type === "product_image" || item.type === "stock_image") {
                         // Imagem por ARQUIVO (stock do CTA, ou modo legado).
@@ -5484,6 +5754,12 @@ function mountFromJSON(jsonString) {
             precoStretchLog = stretchPrecoToNextProduct(seq, products, data.cta_starts || null);
         } catch (eStr) { precoStretchLog = ["erro: " + eStr.message]; }
 
+        // Corta lower thirds que invadem o card de preço (após o stretch).
+        try {
+            var _ltClamp = clampLowerThirdsToPrice(seq, products);
+            for (var _lc = 0; _lc < _ltClamp.length; _lc++) precoStretchLog.push("LT-clamp: " + _ltClamp[_lc]);
+        } catch (eLtC) { precoStretchLog.push("LT-clamp erro: " + eLtC.message); }
+
         // ── AJUSTA duração dos MOGRTs de ponto-chave (LIKE) até o próximo produto ─
         var keyPointFitLog = [];
         try {
@@ -5505,14 +5781,16 @@ function mountFromJSON(jsonString) {
             chapters = buildChaptersList(products, _precoDur, conclTitle);
 
             // Recria marcadores: limpa os antigos e cria um por capítulo.
-            var removedMk = clearSequenceMarkers(seq);
-            if (removedMk > 0) chaptersLog.push("Marcadores antigos removidos: " + removedMk);
+            // Marcadores já foram limpos no início do mount; segunda limpeza é no-op seguro.
+            clearSequenceMarkers(seq);
             var created = 0;
             for (var ch = 0; ch < chapters.length; ch++) {
                 try {
                     var mk = seq.markers.createMarker(chapters[ch].time);
                     try { mk.name = chapters[ch].title; } catch (eNm) {}
-                    try { mk.comments = chapters[ch].title; } catch (eCm) {}
+                    // Armazena o tag/benefício em comments pra poder ser relido depois.
+                    var tagVal = chapters[ch].tag || "";
+                    try { mk.comments = tagVal; } catch (eCm) {}
                     created++;
                 } catch (eMk) {
                     chaptersLog.push("Falha ao criar marcador @ " + chapters[ch].time.toFixed(2) + "s: " + eMk.message);

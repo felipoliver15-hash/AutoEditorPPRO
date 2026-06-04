@@ -234,29 +234,27 @@
 
     <div class="section">
       <p class="hint">
-        Capítulos gerados na montagem (formato do YouTube). Cole na descrição
-        do vídeo. O texto é editável antes de copiar. Marcadores correspondentes
-        são criados na timeline do Premiere.
+        Capítulos gerados na montagem. Cole na descrição do YouTube.<br>
+        A coluna <b>Benefício</b> é editável — escreva ex: "melhor custo-benefício",
+        "mais barato", etc. Cada botão copia o formato correspondente.
       </p>
     </div>
 
-    <div class="section">
-      <textarea id="chapters-text" rows="10"
-        placeholder="Monte o vídeo na aba Montar para gerar os capítulos aqui."
-        style="width:100%; box-sizing:border-box; font-family:monospace; resize:vertical;"></textarea>
+    <div class="section" id="chapters-list-wrap">
+      <div id="chapters-list" style="font-size:11px;font-family:monospace"></div>
     </div>
 
-    <div class="section">
-      <button id="btn-copy-chapters">Copiar capítulos</button>
-      <span id="chapters-copy-status" class="hint"></span>
+    <div class="section row-space" style="gap:6px;flex-wrap:wrap">
+      <button id="btn-copy-names">Copiar Nomes</button>
+      <button id="btn-copy-tags">Copiar Benefícios</button>
+      <span id="chapters-copy-status" class="hint" style="flex:1"></span>
     </div>
 
     <div class="section">
       <button id="btn-refresh-chapters">Atualizar Capítulos</button>
       <span id="chapters-refresh-status" class="hint"></span>
       <p class="hint">
-        Relê os marcadores da timeline e atualiza os tempos — útil se você
-        moveu algum marcador de lugar depois da montagem.
+        Relê os marcadores da timeline — útil se moveu algum marcador depois da montagem.
       </p>
     </div>
 
