@@ -926,7 +926,7 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             url
         ]);
 
-        var ytFinalPath = "", lastPctReported = -1;
+        var ytFinalPath = "", lastPctReported = -1, lastActivityMs = Date.now();
         function processLine(line) {
             var s = line.replace(/\r$/, "").trim();
             if (!s) return;
@@ -940,6 +940,14 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
                 }
                 return;
             }
+            // HLS/Amazon: o downloader ffmpeg NÃO emite "[download] %", emite
+            // "time=00:00:XX". Sem isto a UI fica muda e PARECE travada (mas baixa).
+            var ft = s.match(/\btime=\s*(\d{2}:\d{2}:\d{2})/);
+            if (ft) {
+                lastActivityMs = Date.now();
+                if (typeof onProgress === "function") onProgress("baixando (HLS) " + ft[1]);
+                return;
+            }
             if (!ytFinalPath && /^[A-Za-z]:[\\\/]/.test(s) && /\.(mp4|mkv|webm|m4a)$/i.test(s)) {
                 ytFinalPath = s;
                 return;
@@ -948,6 +956,7 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
             if (/^WARNING\b/i.test(s)) { recLog(s, "warn"); return; }
         }
         function drain(chunk, sink) {
+            lastActivityMs = Date.now();  // qualquer saída = processo vivo (watchdog)
             sink.buf += chunk.toString();
             var idx;
             while ((idx = sink.buf.indexOf("\n")) >= 0) {
@@ -978,8 +987,23 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone) {
         try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (eEnc) {}
         ch.stdout.on("data", function (d) { drain(d, outSink); });
         ch.stderr.on("data", function (d) { drain(d, errSink); });
-        ch.on("error", function (e) { fail("Erro yt-dlp: " + e.message); });
+
+        // Watchdog: se NENHUMA saída por 2 min, considera travado, mata e segue a
+        // fila (evita download "preso" pra sempre). Saída ativa reseta lastActivityMs.
+        var _killedByWatchdog = false;
+        var idleTimer = setInterval(function () {
+            if (Date.now() - lastActivityMs > 120000) {
+                _killedByWatchdog = true;
+                recLog("⏱ Sem progresso por 2 min — abortando este download e seguindo.", "warn");
+                try { clearInterval(idleTimer); } catch (eCi) {}
+                try { ch.kill(); } catch (eK) {}
+            }
+        }, 5000);
+
+        ch.on("error", function (e) { try { clearInterval(idleTimer); } catch (eC) {} fail("Erro yt-dlp: " + e.message); });
         ch.on("close", function (code) {
+            try { clearInterval(idleTimer); } catch (eC) {}
+            if (_killedByWatchdog) { fail("download abortado (sem progresso por 2 min)"); return; }
             if (outSink.buf) processLine(outSink.buf);
             if (errSink.buf) processLine(errSink.buf);
             if (code !== 0) { fail("yt-dlp encerrou com código " + code); return; }
@@ -1051,7 +1075,7 @@ function renderProductCard(n, opts) {
 
     var drop = document.createElement("div");
     drop.style.cssText = "border:2px dashed #555;border-radius:6px;padding:14px;text-align:center;color:#999;cursor:pointer;margin-bottom:8px";
-    drop.textContent = "Arraste vídeos e imagens aqui, ou clique para selecionar";
+    drop.textContent = "Arraste vídeos, imagens ou um .txt com links aqui, ou clique para selecionar";
     expandedView.appendChild(drop);
 
     var ytWrap = document.createElement("div");
@@ -1196,12 +1220,64 @@ function renderProductCard(n, opts) {
     }
 
     function addPaths(paths) {
+        var txts = [];
         (paths || []).forEach(function (p) {
             if (!p) return;
+            // Arquivo .txt = LISTA DE LINKS → baixa em fila (não entra como mídia).
+            if (/\.txt$/i.test(p)) { txts.push(p); return; }
             if (files.some(function (f) { return f.path === p; })) return;
             files.push({ path: p, name: recBaseName(p), isImage: recIsImage(p) });
         });
         renderList();
+        if (txts.length) {
+            var urls = [];
+            txts.forEach(function (tp) { urls = urls.concat(readLinksFromTxt(tp)); });
+            if (urls.length) downloadUrlQueue(urls);
+            else recLog("Nenhum link http(s) encontrado no(s) .txt.", "warn");
+        }
+    }
+
+    // Lê um .txt e extrai 1 link http(s) por linha (ignora texto/linhas em branco).
+    function readLinksFromTxt(txtPath) {
+        var out = [];
+        try {
+            var fs = tryNodeRequire("fs");
+            var content = fs.readFileSync(txtPath, "utf8");
+            content.split(/\r?\n/).forEach(function (line) {
+                var m = String(line).match(/https?:\/\/\S+/);
+                if (m) out.push(m[0]);
+            });
+        } catch (e) { recLog("Erro lendo " + recBaseName(txtPath) + ": " + e.message, "err"); }
+        return out;
+    }
+
+    // Baixa uma lista de URLs EM FILA (uma de cada vez) na pasta do produto.
+    // Cada vídeo baixado entra no staging automaticamente.
+    function downloadUrlQueue(urls) {
+        ytBtn.disabled = true; ytIn.disabled = true;
+        var origLabel = ytBtn.textContent;
+        var i = 0, ok = 0, failed = 0;
+        recLog("Fila de download: " + urls.length + " link(s)…");
+        function next() {
+            if (i >= urls.length) {
+                ytBtn.disabled = false; ytIn.disabled = false; ytBtn.textContent = origLabel;
+                recLog("✓ Fila concluída: " + ok + " baixado(s)" + (failed ? ", " + failed + " falhou" : "") + ".",
+                       failed ? "warn" : "ok");
+                return;
+            }
+            var url = urls[i];
+            ytBtn.textContent = "Fila " + (i + 1) + "/" + urls.length + "…";
+            recLog("Fila " + (i + 1) + "/" + urls.length + ": " + url.substring(0, 70) + (url.length > 70 ? "…" : ""));
+            downloadYTToFolder(n, url,
+                function onProgress(label) { ytBtn.textContent = (i + 1) + "/" + urls.length + " " + label; },
+                function onDone(err, filePath) {
+                    if (err) { failed++; recLog("✗ link " + (i + 1) + ": " + err.message, "err"); }
+                    else { ok++; addPaths([filePath]); }
+                    i++; next();
+                }
+            );
+        }
+        next();
     }
 
     drop.addEventListener("click", function () {
@@ -1229,8 +1305,12 @@ function renderProductCard(n, opts) {
     });
 
     ytBtn.addEventListener("click", function () {
-        var url = (ytIn.value || "").trim();
-        if (!url) { recLog("Cole uma URL primeiro.", "warn"); return; }
+        var raw = (ytIn.value || "").trim();
+        if (!raw) { recLog("Cole uma URL primeiro.", "warn"); return; }
+        // Aceita VÁRIOS links colados (1 por linha ou separados por espaço) → fila.
+        var multi = (raw.match(/https?:\/\/\S+/g) || []);
+        if (multi.length > 1) { ytIn.value = ""; downloadUrlQueue(multi); return; }
+        var url = multi.length ? multi[0] : raw;
         ytBtn.disabled = true; ytIn.disabled = true;
         var originalLabel = ytBtn.textContent;
         ytBtn.textContent = "Baixando…";
