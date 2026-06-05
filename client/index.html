@@ -211,6 +211,17 @@
     <div class="section">
       <label>Produtos</label>
       <button id="btn-add-product" class="btn-primary">+ Adicionar Produto</button>
+      <details id="drive-import" style="margin-top:6px">
+        <summary style="cursor:pointer;font-size:12px;color:#9cf">📁 Importar produtos do Google Drive</summary>
+        <div style="margin-top:6px">
+          <input type="password" id="drive-apikey" placeholder="API key do Google (Drive API)" style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+          <div class="row-space">
+            <input type="text" id="drive-folder" class="flex1" placeholder="link ou ID da pasta-mãe do Drive" style="padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+            <button id="btn-drive-import" style="min-width:90px">Importar</button>
+          </div>
+          <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Cada subpasta "N - Nome" vira PROD_N (imagens + .txt de links). A pasta precisa estar compartilhada "qualquer pessoa com o link".</div>
+        </div>
+      </details>
       <div id="products-container"></div>
     </div>
 

@@ -495,6 +495,22 @@ function copyRecLog() {
 function initRecursos() {
     var addBtn = document.getElementById("btn-add-product");
     if (addBtn) addBtn.addEventListener("click", startNewProductCard);
+
+    // Importação do Google Drive: lembra a API key e dispara a importação.
+    var driveKeyEl = document.getElementById("drive-apikey");
+    if (driveKeyEl) {
+        try { driveKeyEl.value = localStorage.getItem(DRIVE_KEY_STORAGE) || ""; } catch (e) {}
+        driveKeyEl.addEventListener("change", function () { try { localStorage.setItem(DRIVE_KEY_STORAGE, driveKeyEl.value.trim()); } catch (e) {} });
+    }
+    var driveBtn = document.getElementById("btn-drive-import");
+    if (driveBtn) driveBtn.addEventListener("click", function () {
+        var k = ((document.getElementById("drive-apikey") || {}).value || "").trim();
+        var f = ((document.getElementById("drive-folder") || {}).value || "").trim();
+        try { localStorage.setItem(DRIVE_KEY_STORAGE, k); } catch (e) {}
+        importProductsFromDrive(k, f, function (num, opts) {
+            renderProductCard(num, { driveStaged: true, stagedFiles: opts.stagedFiles, refPath: opts.refPath, videoLinks: opts.videoLinks });
+        });
+    });
     var tplBtn = document.getElementById("btn-create-templates");
     if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
     refreshTemplateSeqSection();
@@ -1239,6 +1255,135 @@ function recBaseName(path) {
     return String(path).replace(/[\\\/]+$/, "").split(/[\\\/]/).pop();
 }
 
+// ─── IMPORTAÇÃO DO GOOGLE DRIVE ───────────────────────────────────────────────
+// A automação do usuário sobe, numa pasta-mãe do Drive, subpastas "N - Nome"
+// com as imagens e um .txt de links de vídeo. Aqui o plugin lê essa pasta-mãe e,
+// pra cada subpasta, baixa as imagens/o .txt, popula o staging de um card de
+// produto PROD_N (pré-marcando o .png como referência) e enfileira os vídeos.
+// Acesso: API key do Google (Drive API) + pasta compartilhada "qualquer um c/ link".
+var DRIVE_KEY_STORAGE = "autoeditor_drive_apikey";
+
+// Extrai o ID da pasta de um link do Drive ou aceita o ID puro.
+function _driveExtractFolderId(input) {
+    var s = String(input || "").trim();
+    var m = s.match(/\/folders\/([A-Za-z0-9_-]+)/) || s.match(/[?&]id=([A-Za-z0-9_-]+)/);
+    if (m) return m[1];
+    if (/^[A-Za-z0-9_-]{12,}$/.test(s)) return s; // já é o ID
+    return "";
+}
+
+// Lista os filhos (arquivos/subpastas) de uma pasta do Drive. cb(err, [{id,name,mimeType,size}]).
+function _driveList(apiKey, folderId, cb) {
+    var q = encodeURIComponent("'" + folderId + "' in parents and trashed=false");
+    var fields = encodeURIComponent("files(id,name,mimeType,size)");
+    var url = "https://www.googleapis.com/drive/v3/files?q=" + q +
+              "&key=" + encodeURIComponent(apiKey) +
+              "&fields=" + fields +
+              "&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true";
+    _httpsGet(url, false, function (err, data) {
+        if (err) { cb(err); return; }
+        cb(null, (data && data.files) || []);
+    });
+}
+
+// Baixa um arquivo do Drive (alt=media) pra destPath. cb(err, destPath).
+function _driveDownload(apiKey, fileId, destPath, cb) {
+    var url = "https://www.googleapis.com/drive/v3/files/" + fileId +
+              "?alt=media&supportsAllDrives=true&key=" + encodeURIComponent(apiKey);
+    _httpsGet(url, true, function (err, buf) {
+        if (err) { cb(err); return; }
+        try { tryNodeRequire('fs').writeFileSync(destPath, buf); cb(null, destPath); }
+        catch (e) { cb(e); }
+    });
+}
+
+// Extrai 1 link http(s) por linha de um texto (mesma regra do readLinksFromTxt do card).
+function _extractLinksFromText(content) {
+    var out = [];
+    String(content || "").split(/\r?\n/).forEach(function (line) {
+        var m = String(line).match(/https?:\/\/\S+/);
+        if (m) out.push(m[0]);
+    });
+    return out;
+}
+
+// Orquestra a importação: lê a pasta-mãe, acha as subpastas "N - Nome" e importa
+// cada produto em fila. renderCb(num, {stagedFiles, refPath, videoLinks}) cria o card.
+function importProductsFromDrive(apiKey, folderInput, renderCb) {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    if (!fs || !pmod) { recLog("Node indisponível.", "err"); return; }
+    if (!apiKey) { recLog("Cole a API key do Drive primeiro.", "err"); return; }
+    var folderId = _driveExtractFolderId(folderInput);
+    if (!folderId) { recLog("Link/ID da pasta inválido.", "err"); return; }
+
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        var prjDir = ""; try { prjDir = (JSON.parse(rawPrj) || {}).dir || ""; } catch (e) {}
+        if (!prjDir) { recLog("Salve o projeto antes (as imagens/vídeos vão pra pasta ao lado do .prproj).", "err"); return; }
+
+        recLog("Drive: listando subpastas…");
+        _driveList(apiKey, folderId, function (err, children) {
+            if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); return; }
+            var subs = [];
+            children.forEach(function (c) {
+                if (c.mimeType !== "application/vnd.google-apps.folder") return;
+                var mm = String(c.name).match(/^\s*(\d+)\s*[-–—]\s*(.+)$/); // "N - Nome"
+                if (mm) subs.push({ num: parseInt(mm[1], 10), name: mm[2].replace(/^\s+|\s+$/g, ""), id: c.id });
+            });
+            subs.sort(function (a, b) { return a.num - b.num; });
+            if (!subs.length) { recLog("Drive: nenhuma subpasta no padrão 'N - Nome' encontrada.", "warn"); return; }
+            recLog("Drive: " + subs.length + " produto(s): " + subs.map(function (s) { return s.num + " " + s.name; }).join(" | "));
+
+            var i = 0;
+            (function nextSub() {
+                if (i >= subs.length) { recLog("✓ Drive: importação concluída — confira o png e clique em Criar em cada produto.", "ok"); return; }
+                _driveImportOneProduct(apiKey, prjDir, subs[i++], renderCb, nextSub);
+            })();
+        });
+    });
+}
+
+// Importa UMA subpasta: baixa imagens + .txt, monta o card via renderCb e segue (done()).
+function _driveImportOneProduct(apiKey, prjDir, sub, renderCb, done) {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    var outDir = pmod.join(prjDir, "AutoEditor_Downloads", "PROD_" + sub.num);
+    try { fs.mkdirSync(outDir, { recursive: true }); } catch (e) {}
+    recLog("Drive PROD_" + sub.num + " (" + sub.name + "): listando arquivos…");
+    _driveList(apiKey, sub.id, function (err, files) {
+        if (err) { recLog("✗ Drive PROD_" + sub.num + ": " + err.message, "err"); done(); return; }
+        var imgs = [], txts = [];
+        files.forEach(function (f) {
+            if (/^image\//.test(f.mimeType || "")) imgs.push(f);
+            else if ((f.mimeType === "text/plain") || /\.txt$/i.test(f.name || "")) txts.push(f);
+        });
+        var imgPaths = [], pngPath = null, links = [];
+
+        function downloadAll(list, kind, after) {
+            var k = 0;
+            (function nx() {
+                if (k >= list.length) { after(); return; }
+                var f = list[k++];
+                var dest = pmod.join(outDir, f.name);
+                recLog("  baixando " + kind + ": " + f.name);
+                _driveDownload(apiKey, f.id, dest, function (e2) {
+                    if (e2) { recLog("  ✗ " + f.name + ": " + e2.message, "err"); }
+                    else if (kind === "imagem") { imgPaths.push(dest); if (!pngPath && /\.png$/i.test(f.name)) pngPath = dest; }
+                    else { try { links = links.concat(_extractLinksFromText(fs.readFileSync(dest, "utf8"))); } catch (e3) {} }
+                    nx();
+                });
+            })();
+        }
+
+        downloadAll(imgs, "imagem", function () {
+            downloadAll(txts, "txt", function () {
+                if (!pngPath && imgPaths.length) pngPath = imgPaths[0]; // sem .png → 1ª imagem
+                recLog("✓ Drive PROD_" + sub.num + ": " + imgPaths.length + " imagem(ns), " + links.length + " link(s) de vídeo.", "ok");
+                try { renderCb(sub.num, { stagedFiles: imgPaths, refPath: pngPath, videoLinks: links }); } catch (eR) { recLog("✗ card PROD_" + sub.num + ": " + eR.message, "err"); }
+                done();
+            });
+        });
+    });
+}
+
 function startNewProductCard() {
     if (_pendingProductCard) {
         recLog("Finalize ou cancele o produto atual antes de adicionar outro.", "warn");
@@ -1330,6 +1475,19 @@ function renderProductCard(n, opts) {
         // Card restaurado: já está criado, colapsa imediatamente sem bloquear o botão.
         title.textContent = "✓ PRODUTO " + n;
         setCollapsed(true);
+    } else if (opts && opts.driveStaged) {
+        // Importação do Drive: staging pré-preenchido (imagens) + png pré-marcado.
+        // Vários cards coexistem → NÃO trava o "+ Adicionar Produto". O usuário só
+        // confere/ajusta o png e clica Criar; os vídeos do .txt baixam na fila.
+        (opts.stagedFiles || []).forEach(function (p) {
+            if (p && !files.some(function (f) { return f.path === p; })) {
+                files.push({ path: p, name: recBaseName(p), isImage: recIsImage(p) });
+            }
+        });
+        if (opts.refPath) refPath = opts.refPath;
+        renderList();
+        setCollapsed(false);
+        if (opts.videoLinks && opts.videoLinks.length) downloadUrlQueue(opts.videoLinks);
     } else {
         _pendingProductCard = card;
     }
