@@ -371,6 +371,10 @@ Use quando o vídeo **compara dois produtos spec a spec** (sem o padrão "aprese
 4. `folders` com 1 pasta = mostra só ela; com 2 pastas = intercala as duas DENTRO daquele trecho (use quando a narração compara os dois rapidamente, ex: "ambas geram névoa").
 5. `end_phrase` marca onde todo o preenchimento para (final do vídeo).
 6. Capriche: quanto mais segmentos (um por troca de assunto), mais sincronizado fica. É normal ter 10–20 segmentos num comparativo.
+7. **NÃO PARE NO VEREDITO.** O erro mais comum: criar segmentos só na parte das specs e deixar o ÚLTIMO segmento "esticar" por todo o veredito/conclusão com uma pasta só. O veredito quase sempre **volta a alternar** entre os produtos ("para uso leve a X é a pedida… já para projetos maiores a Y se dá melhor… a X custa entre… a Y entre…"). Continue criando segmentos **até o `end_phrase`**, um a cada vez que o veredito cita um produto:
+   - cita o produto A → `["1"]`; cita o B → `["2"]`; fala dos dois juntos ("as duas resolvem bem", "ambas") → `["1","2"]`.
+   - inclua os trechos finais de preço ("a X está entre 270 e 300", "a Y entre 210 e 320") como segmentos da pasta correspondente.
+   - Regra prática: o ÚLTIMO segmento deve ser curto (a última frase antes do `end_phrase`), nunca um bloco de 40s+ de uma pasta só cobrindo o veredito inteiro.
 
 ### Estrutura
 

@@ -3572,6 +3572,12 @@ function getPropTextValue(prop) {
 // "" = padrão português (reais, vírgula). "en"/"en-US" = inglês (dólar, ponto).
 var _AE_LANG = "";
 
+// Cache do in/out ORIGINAL de cada projectItem windowed, por montagem. Lido UMA
+// vez por item (na 1ª janela) e reusado nas próximas — assim, se um restore do
+// in/out falhar no meio, a janela ainda é calculada a partir do valor verdadeiro
+// (sem corromper/compor o erro slot após slot). Resetado no início de mountFromJSON.
+var _AE_origIO = {};
+
 // Formata o número do preço conforme _AE_LANG — espelha formatPriceByLang() do JS:
 //   - inglês → decimal com PONTO ("240" → "240.00")
 //   - outros → decimal com VÍRGULA ("240" → "240,00")
@@ -4499,6 +4505,9 @@ function buildChaptersList(products, precoDur, conclusionTitle) {
 
     for (var p = 0; p < products.length; p++) {
         var prod = products[p];
+        // Pula o produto VIRTUAL do global_fill (container do head-to-head): não é
+        // um produto real, não deve virar capítulo ("Produto N" atropelava o 1º).
+        if (prod._virtual) continue;
         var title = prod.chapter_title;
         if (!title) {
             title = ((prod.brand ? prod.brand + " " : "") + (prod.name || ("Produto " + (p + 1))));
@@ -4607,6 +4616,32 @@ function templateContentDuration(name) {
         }
     } catch (e) {}
     return 0;
+}
+
+// Lê os marcadores de REGIÃO (com duração) de um projectItem (clipe do bin).
+// Retorna [{start, end}, ...] em segundos, ordenados. Marcadores de PONTO (sem
+// duração) são ignorados. Usado pra "in/out múltiplo": cada região vira uma
+// janela usável, como se fosse um clipe separado.
+function _readClipRegions(pi) {
+    var out = [];
+    try {
+        var mc = pi.getMarkers();
+        if (!mc) return out;
+        var m = null;
+        try { m = mc.getFirstMarker(); } catch (eF) { m = null; }
+        var guard = 0;
+        while (m && guard++ < 5000) {
+            var s = 0, e = 0, okS = false, okE = false;
+            try { s = timeObjToSeconds(m.start); okS = !isNaN(s); } catch (eS) {}
+            try { e = timeObjToSeconds(m.end);   okE = !isNaN(e); } catch (eE) {}
+            if (okS && okE && e > s + 0.04) out.push({ start: s, end: e }); // região = tem duração
+            var nx = null;
+            try { nx = mc.getNextMarker(m); } catch (eN) { nx = null; }
+            m = nx;
+        }
+    } catch (e) {}
+    out.sort(function (a, b) { return a.start - b.start; });
+    return out;
 }
 
 // Duração (segundos) de um projectItem de footage (vídeo na bin). Tenta out-in,
@@ -4911,7 +4946,7 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
 // trecho diferente a cada reutilização. IMPORTANTE: o recorte é feito no
 // projectItem (setInPoint/setOutPoint) ANTES do overwriteClip, porque mexer no
 // .inPoint do clip JÁ inserido na timeline não muda o frame exibido no Premiere.
-function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH, forceExact, itemPath, inOffsetSec, forceLayered) {
+function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH, forceExact, itemPath, inOffsetSec, forceLayered, winStartSec, winLenSec) {
     try {
         var seq = app.project.activeSequence;
         // Usa o caminho completo quando disponível — evita confundir arquivos de nome
@@ -4929,24 +4964,48 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
         // (applyBlurredBackgroundEffect), então as DUAS camadas mostram a mesma
         // janela e ficam alinhadas.
         var _piSaved = null, _winLog = null;
-        if (!forceExact && inOffsetSec > 0 && durationSec > 0) {
+        if (!forceExact && durationSec > 0) {
             try {
-                // mediaType 4 = todas as mídias (vídeo+áudio); tempo em segundos.
-                var gi = item.getInPoint(), go = item.getOutPoint();
-                _piSaved = {
-                    inS: parseFloat(gi.ticks) / TICKS_PER_SECOND,
-                    outS: parseFloat(go.ticks) / TICKS_PER_SECOND,
-                    unit: "sec"
-                };
-                var winIn = inOffsetSec;
-                var winOut = inOffsetSec + durationSec;
-                // Não deixa a janela passar do fim da mídia (offset+dur > duração):
-                // recua a janela pra caber e evitar clip curto / vácuo na timeline.
-                var mediaOut = _piSaved.outS; // out original ≈ duração total da fonte
-                if (mediaOut > 0 && winOut > mediaOut) {
-                    winOut = mediaOut;
-                    winIn = (mediaOut - durationSec > 0) ? (mediaOut - durationSec) : 0;
+                // Janela da fonte. Duas origens:
+                //  (a) EXPLÍCITA (winStartSec): vem do cliente — uma REGIÃO marcada
+                //      (in/out múltiplo) ou o in/out simples. Não depende de ler o
+                //      projectItem (à prova do bug de restore que corrompe o in).
+                //  (b) implícita: lê o in/out do item UMA vez por item (cache) e reusa.
+                var hasExplicitWin = (winStartSec !== undefined && winStartSec !== null);
+                var userInS, userOutS;
+                if (hasExplicitWin) {
+                    userInS  = winStartSec;
+                    userOutS = winStartSec + (winLenSec || durationSec);
+                } else {
+                    var _ioKey = String(itemPath || name || "");
+                    if (_AE_origIO[_ioKey]) {
+                        userInS = _AE_origIO[_ioKey].inS; userOutS = _AE_origIO[_ioKey].outS;
+                    } else {
+                        // mediaType 4 = todas as mídias (vídeo+áudio); tempo em segundos.
+                        var gi = item.getInPoint(), go = item.getOutPoint();
+                        userInS  = parseFloat(gi.ticks) / TICKS_PER_SECOND;  // IN marcado (0 se não marcou)
+                        userOutS = parseFloat(go.ticks) / TICKS_PER_SECOND;  // OUT marcado (≈ duração total se não marcou)
+                        if (isNaN(userInS))  userInS = 0;
+                        if (isNaN(userOutS)) userOutS = 0;
+                        _AE_origIO[_ioKey] = { inS: userInS, outS: userOutS };
+                    }
                 }
+                // Aplica janela EXPLÍCITA quando: janela vinda do cliente, OU há offset
+                // de variedade (>0), OU o usuário marcou um IN (>~1 frame). Sem nada
+                // disso, deixa o overwriteClip usar o range natural do item.
+                var hasUserIn = (userInS > 0.04);
+                if (hasExplicitWin || inOffsetSec > 0 || hasUserIn) {
+                    _piSaved = { inS: userInS, outS: userOutS, unit: "sec" };
+                    // Janela RELATIVA ao IN marcado (não ao início do arquivo): o
+                    // offset de variedade anda DENTRO de [in, out] marcados, e o
+                    // plugin nunca usa footage fora do trecho que você marcou.
+                    var winIn = userInS + inOffsetSec;
+                    var winOut = userInS + inOffsetSec + durationSec;
+                    // Não passa do OUT marcado: recua a janela pra caber em [in, out].
+                    if (userOutS > 0 && winOut > userOutS) {
+                        winOut = userOutS;
+                        winIn = (userOutS - durationSec > userInS) ? (userOutS - durationSec) : userInS;
+                    }
                 item.setInPoint(winIn, 4);
                 item.setOutPoint(winOut, 4);
                 // Verifica se a API interpretou em SEGUNDOS (param ambíguo na doc).
@@ -4962,6 +5021,7 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
                 } else {
                     _winLog = "src-window(sec) [" + winIn.toFixed(1) + "→" + winOut.toFixed(1) + "]s readback=" + chkOut.toFixed(1);
                 }
+                } // fim: aplica janela (offset>0 OU IN marcado)
             } catch (ePI) { _piSaved = null; _winLog = "src-window ERR: " + ePI.message; }
         }
 
@@ -5087,7 +5147,14 @@ function getProductBinMedia(foldersJSON) {
                     else images.push({ name: nm, path: mp || "" });
                 } else if (VEXT[e]) {
                     var d = projectItemMediaDuration(it);
-                    videos.push({ name: nm, path: mp || "", dur: d }); vtotal += d;
+                    // in/out marcados na fonte (pra UI mostrar a janela usável).
+                    var inP = 0, outP = 0;
+                    try { inP = timeObjToSeconds(it.getInPoint()); } catch (eI) {}
+                    try { outP = timeObjToSeconds(it.getOutPoint()); } catch (eO) {}
+                    if (isNaN(inP)) inP = 0; if (isNaN(outP)) outP = 0;
+                    // Regiões marcadas (in/out múltiplo): cada uma vira uma janela.
+                    var regions = _readClipRegions(it);
+                    videos.push({ name: nm, path: mp || "", dur: d, inP: inP, outP: outP, regions: regions }); vtotal += d;
                 }
                 // outros (sequências, áudio, sub-bins) são ignorados
             }
@@ -5601,6 +5668,7 @@ function mountFromJSON(jsonString) {
     try {
         var data = eval("(" + jsonString + ")");
         _AE_LANG = (data && data.language) ? String(data.language) : ""; // moeda do preço por idioma
+        _AE_origIO = {}; // limpa o cache de in/out original (relê fresco nesta montagem)
         var seq  = app.project.activeSequence;
         if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
 
@@ -5729,7 +5797,7 @@ function mountFromJSON(jsonString) {
                         }
                         // Vídeo do produto (bin PROD_N) — insere por nome, corta na duração, sem áudio.
                         // Para global_fill, passa in_offset para mostrar trecho diferente a cada slot.
-                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, false, item.bin_path || null, item.in_offset || 0, !!item._globalfill));
+                        r = JSON.parse(insertBinClipAtTime(item.bin_name, trackIdx, startSec, duration, item.src_w, item.src_h, false, item.bin_path || null, item.in_offset || 0, !!item._globalfill, (item.win_start != null ? item.win_start : null), (item.win_len != null ? item.win_len : null)));
                         if (r && r.success && r.actual_end != null && !item._globalfill) {
                             _vidEnd[trackIdx] = r.actual_end;
                         }

@@ -23,6 +23,27 @@ function formatPriceByLang(val, lang) {
     return /,\d/.test(n) ? n : n + ',00';
 }
 
+// Janelas usáveis de um vídeo do bin (in/out MÚLTIPLO):
+//   - se tem marcadores de REGIÃO → cada região é uma janela (TÊM PRIORIDADE);
+//   - senão → o in/out simples [inP, outP];
+//   - senão (nada marcado) → o vídeo inteiro.
+// Cada janela: { name, path, winStart, winLen, key }. O global_fill/sequencial
+// ciclam entre as janelas como se fossem clipes separados.
+function _videoWindows(v) {
+    var name = v.name, path = v.path || null;
+    if (v.regions && v.regions.length) {
+        var ws = [];
+        for (var i = 0; i < v.regions.length; i++) {
+            var r = v.regions[i], len = (r.end - r.start);
+            if (len > 0.1) ws.push({ name: name, path: path, winStart: r.start, winLen: len, key: name + "#r" + i });
+        }
+        if (ws.length) return ws;
+    }
+    var inP = v.inP || 0, outP = (v.outP || 0);
+    var len2 = (v.dur && v.dur > 0.1) ? v.dur : Math.max(0.1, outP - inP);
+    return [{ name: name, path: path, winStart: inP, winLen: len2, key: name + "#io" }];
+}
+
 // Chave do projeto atual no localStorage (preenchida em initProjectPersistence)
 var _projectKey = "autoeditor_default";
 
@@ -4039,39 +4060,42 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             // ── VÍDEOS DO BIN: entram PRIMEIRO, na duração natural (cortado no preço).
             var imgStart = fillStart;
             var videoLooped = 0;
-            if (bm.videos.length) {
+            // Expande cada vídeo do bin nas suas JANELAS (regiões marcadas, ou in/out,
+            // ou vídeo inteiro). Cada janela vira um clipe — regiões = vários trechos.
+            var vwins = bm.videos.length ? bm.videos.reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []) : [];
+            if (vwins.length) {
                 var vcursor = fillStart, nVid = 0;
-                for (var vi = 0; vi < bm.videos.length; vi++) {
+                for (var vi = 0; vi < vwins.length; vi++) {
                     if (vcursor >= fillEnd - 0.2) break;
-                    var vdurFull = bm.videos[vi].dur || 0;
-                    if (!(vdurFull > 0)) {
-                        log("p" + (pIdx+1) + ": vídeo '" + bm.videos[vi].name + "' com duração 0 (codec não medido?) — pulado.", "warn");
-                        continue;
-                    }
+                    var vwf = vwins[vi];
+                    var vdurFull = vwf.winLen || 0;
+                    if (!(vdurFull > 0)) continue;
                     var vdur = Math.min(vdurFull, fillEnd - vcursor); // corta o último se passar
                     addedItems.push({
-                        type: "product_video", bin_name: bm.videos[vi].name,
-                        bin_path: bm.videos[vi].path || null,
-                        time_seconds: vcursor, duration: vdur, track: track, _autofill: true
+                        type: "product_video", bin_name: vwf.name,
+                        bin_path: vwf.path || null,
+                        time_seconds: vcursor, duration: vdur, track: track, _autofill: true,
+                        win_start: vwf.winStart, win_len: vdurFull
                     });
                     vcursor += vdurFull; nVid++;
                 }
 
-                // SE NÃO HOUVER IMAGENS no bin e ainda sobrar gap, faz LOOP dos vídeos
-                // (cicla na lista repetindo o(s) mesmo(s) vídeo(s) — análogo ao loop
+                // SE NÃO HOUVER IMAGENS no bin e ainda sobrar gap, faz LOOP das janelas
+                // (cicla na lista repetindo o(s) mesmo(s) trecho(s) — análogo ao loop
                 // de imagens em slots cíclicos).
                 if (bm.images.length === 0 && vcursor < fillEnd - 0.2) {
-                    var loopIdx = bm.videos.length;
-                    var safety  = bm.videos.length * 50;
+                    var loopIdx = vwins.length;
+                    var safety  = vwins.length * 50;
                     while (vcursor < fillEnd - 0.2 && safety-- > 0) {
-                        var lv = bm.videos[loopIdx % bm.videos.length];
-                        var lvdur = lv.dur || 0;
+                        var lv = vwins[loopIdx % vwins.length];
+                        var lvdur = lv.winLen || 0;
                         if (!(lvdur > 0)) { loopIdx++; continue; }
                         var thisDur = Math.min(lvdur, fillEnd - vcursor);
                         addedItems.push({
                             type: "product_video", bin_name: lv.name,
                             bin_path: lv.path || null,
-                            time_seconds: vcursor, duration: thisDur, track: track, _autofill: true
+                            time_seconds: vcursor, duration: thisDur, track: track, _autofill: true,
+                            win_start: lv.winStart, win_len: lvdur
                         });
                         vcursor += lvdur; loopIdx++; videoLooped++;
                     }
@@ -4198,20 +4222,22 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     });
                 }
             } else {
-                // Bin só tem vídeos — faz loop dos vídeos pra cobrir o gap.
+                // Bin só tem vídeos — faz loop das JANELAS (regiões/in-out) pra cobrir o gap.
+                var vwinsPF = bmA.videos.reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []);
                 var vcurPF = stretchEnd;
                 var loopIdxPF = 0;
-                var safetyPF = bmA.videos.length * 50;
-                while (vcurPF < nextStartPF - 0.2 && safetyPF-- > 0) {
-                    var pv = bmA.videos[loopIdxPF % bmA.videos.length];
-                    var pvdur = pv.dur || 0;
+                var safetyPF = (vwinsPF.length || 1) * 50;
+                while (vcurPF < nextStartPF - 0.2 && safetyPF-- > 0 && vwinsPF.length) {
+                    var pv = vwinsPF[loopIdxPF % vwinsPF.length];
+                    var pvdur = pv.winLen || 0;
                     if (!(pvdur > 0)) { loopIdxPF++; continue; }
                     var thisDurPF = Math.min(pvdur, nextStartPF - vcurPF);
                     fillItems.push({
                         type: "product_video", bin_name: pv.name,
                         bin_path: pv.path || null,
                         time_seconds: vcurPF, duration: thisDurPF, track: trackA,
-                        _autofill: true, _postpreco: true
+                        _autofill: true, _postpreco: true,
+                        win_start: pv.winStart, win_len: pvdur
                     });
                     vcurPF += pvdur; loopIdxPF++;
                 }
@@ -4281,14 +4307,32 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             var gfHasMedia = false;
             gfFolders.forEach(function (folder) {
                 var bm = binMedia[folder] || {};
+                // Expande cada vídeo nas suas JANELAS (regiões marcadas, ou in/out,
+                // ou vídeo inteiro). A fila cicla entre as janelas como clipes.
+                var gfWindows = (bm.videos || []).reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []);
                 gfQueues[folder] = {
                     images: bm.images || [], imgIdx: 0,
-                    videos: bm.videos || [], vidIdx: 0
+                    videos: gfWindows, vidIdx: 0
                 };
-                if ((bm.images && bm.images.length) || (bm.videos && bm.videos.length)) gfHasMedia = true;
+                if ((bm.images && bm.images.length) || gfWindows.length) gfHasMedia = true;
                 log("Global fill pasta " + folder + ": " +
                     (bm.images ? bm.images.length : 0) + " img, " +
-                    (bm.videos ? bm.videos.length : 0) + " vid", "info");
+                    (bm.videos ? bm.videos.length : 0) + " vid (" + gfWindows.length + " janela(s))", "info");
+                // Mostra a janela usável de cada vídeo: regiões marcadas (cada uma vira
+                // um trecho) ou o in/out. Sem nada → vídeo inteiro (pode "pegar outras
+                // cenas"). O fill anda DENTRO dessas janelas.
+                (bm.videos || []).forEach(function (v) {
+                    var inP = (v.inP || 0), outP = (v.outP || 0), len = (v.dur || 0);
+                    if (v.regions && v.regions.length) {
+                        var rdesc = v.regions.map(function (r) { return "[" + r.start.toFixed(1) + "→" + r.end.toFixed(1) + "]"; }).join(" ");
+                        log("   • " + v.name + ": " + v.regions.length + " região(ões) marcada(s): " + rdesc + "s", "info");
+                    } else {
+                        var looksFull = (inP <= 0.04 && len > 45); // começa em 0 e janela longa = provável SEM marcação
+                        log("   • " + v.name + ": janela in/out [" + inP.toFixed(1) + "→" + outP.toFixed(1) + "]s (" + len.toFixed(1) + "s usáveis)" +
+                            (looksFull ? "  ⚠ parece SEM in/out nem regiões — vai usar o vídeo inteiro" : ""),
+                            looksFull ? "warn" : "info");
+                    }
+                });
             });
 
             var gfItems = [];
@@ -4369,17 +4413,19 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                         // próximo slot E atravessa a borda do segmento (a próxima
                         // inserção sobrescreve a sobra) — mata o gap de 1 frame tanto
                         // entre slots quanto nas EMENDAS de segmento.
-                        var placedDur = dur + GFPAD;
                         if (q && q.videos.length) {
-                            var v = q.videos[q.vidIdx % q.videos.length]; q.vidIdx++;
-                            var key = v.name;
+                            var v = q.videos[q.vidIdx % q.videos.length]; q.vidIdx++; // cicla entre as JANELAS (regiões/in-out)
+                            var key = v.key;
+                            var vdur = v.winLen || 60;
+                            // Slot não passa do tamanho da janela (região curta → slot curto).
+                            if (vdur < dur) dur = Math.max(0.2, vdur);
                             var off = gfInOffsets[key] || 0;
-                            var vdur = v.dur || 60;
                             gfInOffsets[key] = (off + dur) % vdur;
                             gfItems.push({
                                 type: "product_video",
                                 bin_name: v.name, bin_path: v.path || null,
-                                time_seconds: t, duration: placedDur, in_offset: off,
+                                time_seconds: t, duration: dur + GFPAD, in_offset: off,
+                                win_start: v.winStart, win_len: vdur, // janela absoluta (região/in-out)
                                 track: gfTrack, _autofill: true, _globalfill: true
                             });
                             added++;
@@ -4388,7 +4434,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                             gfItems.push({
                                 type: "product_image",
                                 bin_name: im.name, bin_path: im.path || null,
-                                time_seconds: t, duration: placedDur, animation: "none",
+                                time_seconds: t, duration: dur + GFPAD, animation: "none",
                                 track: gfTrack, _autofill: true, _globalfill: true,
                                 _zoomPreset: (idx % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
                             });
@@ -4590,21 +4636,23 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
                     });
                 }
             } else if (vidsR.length > 0) {
-                // Sem imagens — loop dos vídeos do bin pra cobrir [s0, s1].
+                // Sem imagens — loop das JANELAS (regiões/in-out) pra cobrir [s0, s1].
+                var vwinsR = vidsR.reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []);
                 var vcurR = s0;
                 var loopIdxR = 0;
-                var safetyR = vidsR.length * 50;
+                var safetyR = (vwinsR.length || 1) * 50;
                 var nVidLooped = 0;
-                while (vcurR < s1 - 0.2 && safetyR-- > 0) {
-                    var rv = vidsR[loopIdxR % vidsR.length];
-                    var rvdur = rv.dur || 0;
+                while (vcurR < s1 - 0.2 && safetyR-- > 0 && vwinsR.length) {
+                    var rv = vwinsR[loopIdxR % vwinsR.length];
+                    var rvdur = rv.winLen || 0;
                     if (!(rvdur > 0)) { loopIdxR++; continue; }
                     var thisDurR = Math.min(rvdur, s1 - vcurR);
                     out.push({
                         type: "product_video", bin_name: rv.name,
                         bin_path: rv.path || null,
                         time_seconds: vcurR, duration: thisDurR,
-                        track: 1, _autofill: true, _recap: true
+                        track: 1, _autofill: true, _recap: true,
+                        win_start: rv.winStart, win_len: rvdur
                     });
                     vcurR += rvdur; loopIdxR++; nVidLooped++;
                 }
