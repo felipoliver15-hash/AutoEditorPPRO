@@ -14,3 +14,7 @@ AutoEditor_Downloads/
 
 # Node (caso algum dia)
 node_modules/
+
+# Runtime JS baixado sob demanda (nao versionar)
+bin/deno.exe
+bin/deno.zip

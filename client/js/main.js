@@ -1054,6 +1054,71 @@ function chooseVideosModal(entries, onChoose) {
     document.body.appendChild(overlay);
 }
 
+// Garante um runtime JS (Deno) pro yt-dlp resolver o desafio do YouTube (nsig).
+// Sem ele, vídeos falham com "This video is not available". Ordem:
+//   1) deno.exe embutido (baixado antes) → usa.
+//   2) deno no PATH → yt-dlp acha sozinho (não precisa flag).
+//   3) node no PATH → usa via --js-runtimes node.
+//   4) nada → baixa o deno.exe pro bin/ (uma vez).
+// Chama cb(jsRuntimeArg) com a string pra --js-runtimes ("deno:<path>"/"node")
+// ou null (deixa o yt-dlp auto-detectar / sem runtime).
+function ensureJsRuntime(extDir, cb) {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path'), cp = tryNodeRequire('child_process');
+    if (!fs || !pmod) { cb(null); return; }
+    var bundledDeno = extDir ? pmod.join(extDir, "bin", "deno.exe") : "";
+    try { if (bundledDeno && fs.existsSync(bundledDeno)) { cb("deno:" + bundledDeno); return; } } catch (e) {}
+
+    function onPath(exe) {
+        try { var r = cp.spawnSync(exe, ["--version"], { windowsHide: true, timeout: 6000 }); return !!(r && r.status === 0); }
+        catch (e) { return false; }
+    }
+    if (onPath("deno")) { cb(null); return; }   // yt-dlp usa o deno do PATH sozinho
+    if (onPath("node")) { cb("node"); return; }
+
+    downloadDeno(extDir, function (err, denoPath) {
+        if (err || !denoPath) {
+            recLog("⚠ Não consegui obter o runtime JS (Deno): " + (err ? err.message : "?") + " — alguns vídeos do YouTube podem falhar.", "warn");
+            cb(null); return;
+        }
+        cb("deno:" + denoPath);
+    });
+}
+
+// Baixa o deno.exe (release oficial, .zip ~40MB) pro <extDir>/bin/ e extrai com o
+// tar do Windows. cb(err, denoPath). Só roda uma vez (depois fica embutido).
+function downloadDeno(extDir, cb) {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path'), cp = tryNodeRequire('child_process');
+    if (!fs || !pmod || !cp || !extDir) { cb(new Error("Node indisponível")); return; }
+    var binDir = pmod.join(extDir, "bin");
+    try { fs.mkdirSync(binDir, { recursive: true }); } catch (e) {}
+    var zipPath = pmod.join(binDir, "deno.zip");
+    var denoPath = pmod.join(binDir, "deno.exe");
+    var url = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+    recLog("Baixando runtime JS (Deno ~40MB, só na primeira vez)…");
+    _httpsGet(url, true, function (err, buf) {
+        if (err) { cb(err); return; }
+        try { fs.writeFileSync(zipPath, buf); } catch (eW) { cb(eW); return; }
+        recLog("Extraindo Deno…");
+        // Extrai com PowerShell Expand-Archive (sempre presente no Windows e lida
+        // com o caminho nativamente). cwd no bin/ + nome relativo evita problema de
+        // espaço no caminho (ex: "Local Apps") e o tar interpretando "C:" como host.
+        var ch;
+        try {
+            ch = cp.spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                "Expand-Archive -Path deno.zip -DestinationPath . -Force"],
+                { cwd: binDir, windowsHide: true });
+        } catch (eS) { cb(eS); return; }
+        ch.on("error", function (e) { cb(e); });
+        ch.on("close", function (code) {
+            try { fs.unlinkSync(zipPath); } catch (e) {}
+            try {
+                if (fs.existsSync(denoPath)) { recLog("✓ Deno instalado no plugin (bin/deno.exe).", "ok"); cb(null, denoPath); }
+                else { cb(new Error("deno.exe não apareceu após extrair (Expand-Archive saiu " + code + ")")); }
+            } catch (eC) { cb(eC); }
+        });
+    });
+}
+
 // Baixa o vídeo via yt-dlp. Entrega o caminho final via onDone(err, path).
 // onProgress(text) é chamado a cada 5% pra atualizar a UI (ex: rótulo do botão).
 function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems) {
@@ -1091,6 +1156,14 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
     recLog("Baixando → PRODUTO " + folder + " | " + url);
     if (multi) recLog("Itens selecionados: " + playlistItems);
 
+    // YouTube precisa de runtime JS (Deno) pro yt-dlp resolver o desafio (nsig);
+    // sem ele dá "This video is not available". Garante o runtime ANTES de baixar
+    // (usa deno/node do PATH, ou baixa o deno embutido 1x). Outros sites não precisam.
+    var _hostJs = "";
+    try { _hostJs = ((String(url).match(/^https?:\/\/([^\/?#]+)/i) || [])[1] || "").toLowerCase(); } catch (eHj) {}
+    var _needsJs = (_hostJs.indexOf("youtube.com") >= 0 || _hostJs.indexOf("youtu.be") >= 0);
+
+    function afterRuntime(jsRuntimeArg) {
     detectFfmpeg(function (ff) {
         var formatSel, extraArgs = [];
         if (ff.ok) {
@@ -1119,8 +1192,9 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
         // playlistItems vem do seletor (ex "2,4,5") ou "1" no caso normal.
         // Usamos --playlist-items (e não --no-playlist, que faz a Amazon falhar).
         var selectArgs = ["--playlist-items", playlistItems];
+        var jsArgs = jsRuntimeArg ? ["--js-runtimes", jsRuntimeArg] : []; // runtime JS p/ YouTube
 
-        var args = ["-f", formatSel].concat(extraArgs).concat(selectArgs).concat([
+        var args = ["-f", formatSel].concat(extraArgs).concat(selectArgs).concat(jsArgs).concat([
             "--restrict-filenames", "--no-warnings",
             "--force-overwrites",
             "-o", pmod.join(outDir, "%(title)s.%(ext)s"),
@@ -1245,6 +1319,10 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
             onDone(null, multi ? ytPaths : ytPaths[0]);
         });
     });
+    } // fim afterRuntime
+
+    if (_needsJs) ensureJsRuntime(extDir, afterRuntime);
+    else afterRuntime(null);
 }
 
 function recIsImage(path) {
