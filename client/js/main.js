@@ -1180,7 +1180,18 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
                 // downloader nativo pra DASH).
                 "--remux-video", "mp4",
                 "--downloader", "m3u8:ffmpeg",
-                "--hls-use-mpegts"
+                // NÃO usar --hls-use-mpegts: ele grava o HLS como MPEG-TS dentro de
+                // um arquivo .mp4 e, como a extensão já é .mp4, o yt-dlp PULA o remux
+                // (só faz remux/merge quando há faixas separadas, ex. Amazon). Em
+                // stream único já mesclado (Mercado Livre) sobrava TS cru num .mp4 →
+                // o Premiere recusa ("unsupported compression type"). Sem o flag, o
+                // downloader m3u8:ffmpeg converte TS→MP4 (tag avc1/mp4a, descarta o
+                // stream de dados timed_id3) e o arquivo importa normal.
+                // O Premiere/CEP roda SEM console anexado. O ffmpeg (chamado pelo
+                // yt-dlp como downloader de HLS) tenta ler o stdin pra tecla [q] e,
+                // com handle de stdin inválido, sai com "code 4294967268" (HLS do
+                // ML/Amazon não baixava). -nostdin faz o ffmpeg ignorar o stdin.
+                "--downloader-args", "ffmpeg:-nostdin"
             ];
             if (ff.dir) extraArgs.push("--ffmpeg-location", ff.dir);
         } else {
@@ -1262,7 +1273,11 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
         spawnEnv.PYTHONIOENCODING = "utf-8";
 
         var ch;
-        try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv }); }
+        // stdio: ["ignore", ...] dá ao yt-dlp (e ao ffmpeg filho) um stdin NUL
+        // VÁLIDO. Sem isso, dentro do Premiere/CEP (processo GUI sem console) o
+        // ffmpeg herda um handle de stdin inválido e o download HLS falha com
+        // "ffmpeg exited with code 4294967268". Cobre downloader E merge.
+        try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] }); }
         catch (eSp) { fail("Falha ao iniciar yt-dlp: " + eSp.message); return; }
         try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (eEnc) {}
         ch.stdout.on("data", function (d) { drain(d, outSink); });
