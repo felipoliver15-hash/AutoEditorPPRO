@@ -948,9 +948,12 @@ function probePlaylist(url, extDir, cb) {
     var ytdlp; try { ytdlp = (bundled && fs.existsSync(bundled)) ? bundled : "yt-dlp"; } catch (e) { ytdlp = "yt-dlp"; }
     var spawnEnv = {}; try { Object.keys(process.env || {}).forEach(function (k) { spawnEnv[k] = process.env[k]; }); } catch (e) {}
     spawnEnv.PYTHONIOENCODING = "utf-8";
-    var args = ["--flat-playlist", "--dump-single-json", "--no-warnings", url];
+    // --extractor-retries: a Amazon serve página de captcha/anti-bot de forma
+    // intermitente; sem retries extras o probe conta vídeos a menos ou falha.
+    var args = ["--flat-playlist", "--dump-single-json", "--no-warnings",
+                "--extractor-retries", "10", "--retry-sleep", "extractor:2", url];
     var out = "", ch;
-    try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv }); }
+    try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] }); }
     catch (e) { cb(null); return; }
     try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (e) {}
     ch.stdout.on("data", function (d) { out += d.toString(); });
@@ -1205,10 +1208,23 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
         var selectArgs = ["--playlist-items", playlistItems];
         var jsArgs = jsRuntimeArg ? ["--js-runtimes", jsRuntimeArg] : []; // runtime JS p/ YouTube
 
+        // Em multi-seleção (ex. Amazon "1,2,3,4,5"), os vídeos do MESMO produto
+        // costumam vir com título E id IGUAIS (só a URL muda). Com %(title)s e
+        // --force-overwrites eles se sobrescreviam e sobrava só 1 arquivo. Prefixar
+        // com o índice da playlist (01-, 02-…) garante nomes únicos. No download
+        // único mantém o nome limpo de sempre.
+        var outTemplate = multi
+            ? pmod.join(outDir, "%(playlist_index)02d-%(title)s.%(ext)s")
+            : pmod.join(outDir, "%(title)s.%(ext)s");
+
         var args = ["-f", formatSel].concat(extraArgs).concat(selectArgs).concat(jsArgs).concat([
             "--restrict-filenames", "--no-warnings",
+            // A Amazon serve captcha/anti-bot intermitente; o extrator re-tenta a
+            // página, mas o padrão (3) às vezes estoura → "Unable to extract data".
+            // Mais retries + pausa entre elas torna o download bem mais resiliente.
+            "--extractor-retries", "10", "--retry-sleep", "extractor:2",
             "--force-overwrites",
-            "-o", pmod.join(outDir, "%(title)s.%(ext)s"),
+            "-o", outTemplate,
             "--print", "after_move:%(filepath)s",
             url
         ]);
