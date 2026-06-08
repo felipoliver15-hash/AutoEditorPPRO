@@ -46,7 +46,15 @@
 
     <div class="section">
       <button id="btn-load-from-folder" class="btn-primary" style="background:#2d5a3d">📂 Carregar da pasta do projeto</button>
-      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Busca o *_autoeditor.json e a transcrição (.json) na pasta do .prproj — o mais recente de cada.</div>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Busca o *_autoeditor.json e a transcrição (.json) na pasta do .prproj — o mais recente de cada. Se NÃO houver mapeamento, gera com o Gemini (abaixo) e salva na pasta.</div>
+      <details style="margin-top:6px">
+        <summary style="cursor:pointer;font-size:11px;color:#9ad">🤖 Gerar mapeamento com IA (Gemini) — usado só se não houver *_autoeditor.json</summary>
+        <div style="margin-top:6px">
+          <input type="password" id="gemini-apikey" placeholder="API key do Gemini (aistudio.google.com)" style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+          <textarea id="gemini-products" rows="6" placeholder="Cole a lista de produtos (na ordem do vídeo), ex:&#10;✅1. Ddpai Z60 4G (R$ 1.120 - R$ 2.560)&#10;✅2. 70mai A800S-E1 (R$ 900 - R$ 1.370)" style="width:100%;box-sizing:border-box;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;font-size:11px;font-family:monospace;resize:vertical"></textarea>
+          <div class="hint" style="font-size:10px;color:#888;margin-top:3px">A chave fica salva neste PC (localStorage), nunca no projeto. A lista é lembrada por projeto.</div>
+        </div>
+      </details>
     </div>
 
     <div class="section">

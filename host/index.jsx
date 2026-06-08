@@ -4474,9 +4474,13 @@ function measureTemplateDuration(name) {
 //   - Exceção CTA: produto com cta_before=true começa no FIM do preço do produto
 //     anterior (= início do CTA), pra quem pular não perder o CTA de inscrição
 //   - Conclusão: no FIM do preço do último produto (título configurável)
-function buildChaptersList(products, precoDur, conclusionTitle) {
+function buildChaptersList(products, precoDur, conclusionTitle, introTitle) {
     if (!precoDur || precoDur <= 0) precoDur = 5;
-    var chaps = [{ time: 0, title: "Introdução" }];
+    // Intro (0:00): se o JSON trouxer um gancho do vídeo (intro_title), usa ele
+    // no NOME e também no BENEFÍCIO (as duas listas mostram a mesma frase no 0:00,
+    // ex. "Qual a Melhor Câmera Veicular em 2026?"). Sem ele, cai em "Introdução".
+    var _intro = (introTitle && String(introTitle).replace(/^\s+|\s+$/g, "")) || "";
+    var chaps = [{ time: 0, title: _intro || "Introdução", tag: _intro }];
 
     function itemTime(it) {
         if (it.time_seconds == null) return null;
@@ -4541,7 +4545,9 @@ function buildChaptersList(products, precoDur, conclusionTitle) {
     for (var k = 0; k < chaps.length; k++) {
         var ti = Math.floor(chaps[k].time);
         if (ti === lastT) continue;
-        out.push({ time: chaps[k].time, title: chaps[k].title });
+        // Mantém o tag/benefício (antes era descartado aqui → benefício nunca
+        // chegava preenchido na aba Capítulos nem no comments do marcador).
+        out.push({ time: chaps[k].time, title: chaps[k].title, tag: chaps[k].tag || "" });
         lastT = ti;
     }
     return out;
@@ -5183,7 +5189,9 @@ function getProjectDir() {
     try {
         var p = app.project.path || "";
         var i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
-        return JSON.stringify({ dir: (i >= 0 ? p.substring(0, i) : "") });
+        var seq = "";
+        try { seq = (app.project.activeSequence && app.project.activeSequence.name) ? String(app.project.activeSequence.name) : ""; } catch (eS) {}
+        return JSON.stringify({ dir: (i >= 0 ? p.substring(0, i) : ""), seq: seq });
     } catch (e) { return JSON.stringify({ dir: "" }); }
 }
 
@@ -5890,13 +5898,17 @@ function mountFromJSON(jsonString) {
         var chapters = [];
         var chaptersLog = [];
         try {
-            // Título da conclusão: data.conclusion pode ser string, {title:...} ou false (desliga)
-            var conclTitle = null;
+            // Título da conclusão. A conclusão NÃO é obrigatória: nem todo vídeo
+            // tem fechamento/recap. Default = SEM capítulo de conclusão (false).
+            // Só cria o capítulo se o JSON trouxer `conclusion` (string ou objeto).
+            var conclTitle = false;
             if (data.conclusion === false) conclTitle = false;
-            else if (typeof data.conclusion === "string") conclTitle = data.conclusion;
-            else if (data.conclusion && data.conclusion.title) conclTitle = data.conclusion.title;
+            else if (typeof data.conclusion === "string" && data.conclusion) conclTitle = data.conclusion;
+            else if (data.conclusion && typeof data.conclusion === "object") conclTitle = data.conclusion.title || "Conclusão";
 
-            chapters = buildChaptersList(products, _precoDur, conclTitle);
+            // Intro relacionada ao vídeo (gancho/título). Aceita intro_title ou video_title.
+            var introTitle = data.intro_title || data.video_title || "";
+            chapters = buildChaptersList(products, _precoDur, conclTitle, introTitle);
 
             // Recria marcadores: limpa os antigos e cria um por capítulo.
             // Marcadores já foram limpos no início do mount; segunda limpeza é no-op seguro.

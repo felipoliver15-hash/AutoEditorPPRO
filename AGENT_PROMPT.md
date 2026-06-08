@@ -67,8 +67,10 @@ Se não for óbvio, pergunte ao usuário antes de gerar o JSON:
    De cada item o agente extrai:
    - **número** (`1`, `2`, …) → ordem do produto e `folder` (`"1"`, `"2"`, …).
    - **nome** (ex: `"Black Tools Tpp21a"`) → vira `brand` + `name` exibidos no card.
-   - **faixa de preço** (ex: `R$ 240,00 - R$ 270,00`) → `price_min` / `price_max`.
-   - links 🛒 → **ignore** (não entram no JSON).
+   - **faixa de preço** → SEMPRE a que está **entre parênteses na linha `✅`** (ex: `(R$ 240,00 - R$ 270,00)`) → `price_min` / `price_max`.
+   - linhas 🛒 → **IGNORE A LINHA INTEIRA** (links E quaisquer preços por loja no fim dela, ex.
+     `🛒Amazon: https://… - R$ 1.600,00`). NUNCA use um preço de linha 🛒 como min/max —
+     a faixa oficial é só a dos parênteses da linha `✅`.
 
 CTAs de inscrição, recap final e specs (lower thirds) o agente detecta sozinho a partir
 da transcrição.
@@ -117,7 +119,15 @@ O plugin usa esse campo pra formatar o **número** do preço. Regras pros campos
 
 ## SAÍDA
 - **Somente** um objeto JSON válido (sem comentários, sem texto fora do JSON).
-- Estrutura: `{ "language": "pt"|"en", "products": [...], "conclusion": {...}, "key_points": [...] }`.
+- Estrutura: `{ "language": "pt"|"en", "intro_title": "...", "products": [...], "conclusion": {...} (opcional), "key_points": [...] }`.
+
+### `intro_title` — gancho do capítulo de introdução (0:00)
+Título **relacionado ao tema do vídeo** para o primeiro capítulo (0:00) — NÃO use a
+palavra genérica "Introdução". Normalmente é a pergunta/promessa do vídeo.
+- Ex.: vídeo de câmeras veiculares → `"Qual a Melhor Câmera Veicular em 2026?"`
+- Ex.: vídeo de serras circulares → `"Qual a Melhor Serra Circular?"`
+- Tire do começo da narração (a pergunta que abre o vídeo) ou do tema do comparativo.
+- Aparece tanto na lista de **nomes** quanto na de **benefícios** (mesma frase no 0:00).
 
 ---
 
@@ -138,10 +148,14 @@ O plugin resolve cada `after_phrase` casando **palavras consecutivas** da transc
 Os erros mais frequentes — TODOS por usar o que está no roteiro/lista de produtos em vez do
 que foi **falado** na transcrição:
 
-1. **Preços com `R$`** — a transcrição transcreve `reais`, NÃO `R$`.
-   - ❌ `"fica entre 250 e 300 R$"`
-   - ✅ `"fica entre 250 e 300 reais"`  (se foi assim na transcrição)
-   - ✅ `"entre duzentos e cinquenta e trezentos reais"` (se foi por extenso)
+1. **Preços — copie EXATAMENTE como está na transcrição (NÃO assuma o formato).**
+   Pode vir de 3 jeitos, dependendo do canal/transcrição — **olhe a transcrição e copie igual**:
+   - como **`reais`**: `"fica entre 250 e 300 reais"`
+   - por **extenso**: `"entre duzentos e cinquenta e trezentos reais"`
+   - como **dígitos + `R$`** (alguns canais transcrevem assim, com o `R$` DEPOIS do número):
+     ex. a transcrição traz `"entre 1.680 R$ e 2.660 R$"` → use **`"entre 1.680 R$ e 2.660 R$"`**.
+   - ❌ NÃO troque `R$` por `reais` (nem o contrário): se a transcrição diz `"1.680 R$"`, escrever
+     `"1.680 reais"` **não casa** e o card de preço fica sem posição. Copie o que está lá.
 
 2. **Números formatados (`1.430`, `1430`) vs por extenso (`mil quatrocentos e trinta`)** —
    o Whisper/Premiere muitas vezes transcreve números MAIORES por extenso e pequenos como
@@ -199,34 +213,47 @@ Para CADA produto, a `timeline` é SEMPRE estes 5 itens, nesta ordem:
   "price_min": "R$ 330",
   "price_max": "R$ 420",
   "folder": "1",
-  "chapter_tag": "melhor custo-benefício",
+  "chapter_tag": "Serra com melhor custo-benefício premium",
   "image_prompts": [ "...", "...", "...", "...", "...", "...", "..." ],
   "timeline": [ ...os 5 itens acima... ],
   "lower_thirds": [ ... ]
 }
 ```
 
-### `chapter_tag` — Benefício do produto no capítulo
+### `chapter_tag` — Benefício do produto no capítulo  ← **SEMPRE PREENCHER**
 
-Texto **curto** (até ~40 caracteres) que descreve o **posicionamento ou veredito** do produto —
-aparece como segunda linha de capítulo na aba Capítulos do plugin (o editor escolhe qual copiar).
+Frase **de benefício** (até ~50 caracteres) que descreve **para quem / para quê aquele
+produto é a melhor escolha** — vai virar a lista de **benefícios** dos capítulos (o editor
+copia a lista de nomes OU a de benefícios). Deve fazer sentido lida sozinha, ao lado do
+timestamp.
 
-Preencha com base no que a narração diz sobre o papel daquele produto no comparativo:
+Diferente de uma tag de 3 palavras: escreva uma frase **descritiva e específica do produto**,
+no mesmo estilo deste exemplo real (vídeo de câmeras veiculares):
 
-| Situação na narração | Exemplo de `chapter_tag` |
+```
+Benefício
+0:00 Qual a Melhor Câmera Veicular em 2026?
+0:38 Câmera com máxima proteção e acesso remoto
+1:50 Câmera com melhor custo-benefício premium
+3:09 Câmera ideal para motoristas de app
+4:17 Câmera Frente e ré com melhor custo-benefício
+5:21 Câmera de entrada mais honesta da lista
+```
+
+- Comece pela **categoria** quando ajudar a entender (ex.: "Câmera...", "Serra...", "Aspirador...")
+  e diga o **diferencial/perfil**: custo-benefício, top de linha, entrada, perfil de uso, recurso único.
+- Baseie-se no **veredito que o locutor dá** sobre o produto (ao descrever ou na recap).
+  Ex.: recap diz "a WAP resolve pra quem quer gastar menos" → `"Aspirador de entrada mais honesto"`.
+- **Preencha em TODOS os produtos.** Só omita se a narração realmente não der nenhuma pista
+  do posicionamento (aí o plugin repete o nome na lista de benefícios).
+
+| Posicionamento na narração | Exemplo de `chapter_tag` (frase de benefício) |
 |---|---|
-| O mais barato / entrada de gama | `"mais barato do comparativo"` |
-| Melhor custo-benefício | `"melhor custo-benefício"` |
-| Intermediário / boa relação | `"intermediário com diferenciais"` |
-| Top de linha / mais completo | `"top de linha"` |
-| Melhor para uso profissional | `"escolha profissional"` |
-| Melhor para uso doméstico | `"ideal para uso doméstico"` |
-| Mais leve / mais portátil | `"mais leve do grupo"` |
-
-- Baseie-se no **veredito que o locutor dá** ao final da descrição do produto ou na recap.
-- Se o produto for mencionado na `conclusion.recap`, use a mesma ideia: ex. recap diz
-  "a WAP ou a Philco resolve pra quem quer gastar menos" → `chapter_tag` da WAP = `"opção econômica"`.
-- Se a narração não deixar claro o posicionamento, omita o campo (o plugin usa só o nome).
+| Top de linha / mais completo | `"Câmera com máxima proteção e acesso remoto"` |
+| Melhor custo-benefício (premium) | `"Câmera com melhor custo-benefício premium"` |
+| Perfil de uso específico | `"Câmera ideal para motoristas de app"` |
+| Recurso diferencial | `"Câmera Frente e ré com melhor custo-benefício"` |
+| Entrada de gama / mais barato | `"Câmera de entrada mais honesta da lista"` |
 
 - `folder`: numeração sequencial em string — `"1"`, `"2"`, `"3"`, `"4"`... (ordem do vídeo).
 - `price_min` / `price_max`: **pt** → `"R$ NNN"` (vírgula no decimal); **en** → `"NNN.NN"` (só número, ponto, sem `$`). Ver seção **IDIOMA E MOEDA**.
@@ -299,7 +326,12 @@ acessórios inclusos (guia paralela, chave, bocal de aspiração).
 
 ---
 
-## CONCLUSÃO / RECAP (no final do vídeo)
+## CONCLUSÃO / RECAP (no final do vídeo) — **OPCIONAL**
+
+⚠️ **A conclusão NÃO é obrigatória — nem todo vídeo tem fechamento/recap.** Só inclua o
+campo `conclusion` se a narração realmente reapresentar/resumir os produtos no final.
+**Se o vídeo não tiver conclusão, NÃO inclua o campo `conclusion`** — o plugin então não
+cria o capítulo de conclusão (antes ele forçava um "Conclusão" mesmo sem haver).
 
 Se a narração **reapresenta os produtos no final** (ex: "resumindo, a WAP ou a Philco
 resolve... a Bosch é o melhor custo-benefício... a Makita é a escolha"), monte:
@@ -342,8 +374,9 @@ meio e no fim do vídeo), adicione uma entrada com `after_phrase` distinta de ca
 
 ## CAMPOS OPCIONAIS (use só quando fizer sentido)
 
-- `product.chapter_tag`: veredito/posicionamento curto do produto (ver seção acima).
-  **Sempre preencha** quando a narração deixar clara a posição do produto no ranking.
+- `product.chapter_tag`: **frase de benefício** do produto (ver seção acima).
+  **Preencha em todos os produtos** — vira a lista de benefícios dos capítulos.
+- `intro_title` (topo do JSON): gancho do capítulo 0:00 relacionado ao vídeo (ver seção acima).
 - `product.chapter_title`: título custom do capítulo daquele produto (default = marca + nome).
 - `product.cta_before` (`true`): marque no produto que vem **logo depois** de um CTA, para o
   capítulo dele começar no início do CTA (assim quem pula pro produto não perde o CTA).
@@ -380,6 +413,7 @@ Use quando o vídeo **compara dois produtos spec a spec** (sem o padrão "aprese
 
 ```json
 {
+  "intro_title": "Qual a Melhor Pistola de Pintura?",
   "products": [
     {
       "brand": "Black Tusk vs DECO",
@@ -387,7 +421,7 @@ Use quando o vídeo **compara dois produtos spec a spec** (sem o padrão "aprese
       "price_min": "R$ XXX",
       "price_max": "R$ YYY",
       "folder": "1",
-      "chapter_tag": "sem fio vs com fio",
+      "chapter_tag": "Pistola sem fio vs com fio: qual compensa",
       "timeline": [
         { "after_phrase": "<intro do comparativo>", "type": "template_insert", "template": "TRANSICAO_2", "anchor": "marker", "offset_seconds": 0, "track": 5 },
         { "after_phrase": "<intro do comparativo>", "type": "template_insert", "template": "PRODUTO", "track": 1 },
@@ -452,7 +486,8 @@ Se ditos em momentos separados, crie duas lower thirds distintas (uma pra cada).
 O `global_fill` é **totalmente aditivo** — o modo padrão (produto por produto) continua funcionando exatamente igual. Os dois podem até coexistir no mesmo JSON se necessário.
 
 > O plugin gera sozinho os capítulos do YouTube e os marcadores — você NÃO precisa criar
-> capítulos, só (opcionalmente) `conclusion.title`, `chapter_title` e `cta_before`.
+> capítulos. Você fornece: `intro_title` (gancho do 0:00), `chapter_tag` (benefício de
+> cada produto) e, **só se houver**, `conclusion`. Opcionais: `chapter_title`, `cta_before`.
 
 ---
 
@@ -463,6 +498,7 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 
 ```json
 {
+  "intro_title": "Qual a Melhor Serra Circular?",
   "products": [
     {
       "brand": "WAP",
@@ -470,7 +506,7 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
       "price_min": "R$ 330",
       "price_max": "R$ 420",
       "folder": "1",
-      "chapter_tag": "opção econômica",
+      "chapter_tag": "Serra de entrada com melhor custo-benefício",
       "image_prompts": [
         "circular saw cutting a wooden plank on a workbench, sawdust flying, woodshop environment, side angle action shot",
         "circular saw resting on a stack of fresh lumber at a construction site, morning sunlight, wide composition",
@@ -531,6 +567,8 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 4. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
    - **`brand`/`name`/`price_min`/`price_max` vêm da LISTA do usuário** (grafia normalizada), **não** da transcrição. Gatilhos (`after_phrase` etc.) seguem a transcrição literal.
 5. Exatamente 7 `image_prompts` em inglês por produto (sequencial) ou por produto do confronto (head-to-head).
-6. Lower thirds nos specs (curtas), recap se houver, key_points pra cada CTA.
+6. Lower thirds nos specs (curtas), key_points pra cada CTA. **`conclusion` só se o vídeo
+   realmente tiver recap/fechamento** — se não tiver, NÃO inclua o campo.
 7. `folder` sequencial "1","2",...; **`language`** no root (`"pt"`/`"en"`) e preços no formato do idioma (pt: `"R$ NNN,NN"` · en: `"NNN.NN"` sem `$`).
-8. `chapter_tag` preenchido em **cada produto** onde a narração deixa claro o posicionamento.
+8. **`intro_title`** no root (gancho do 0:00 relacionado ao vídeo, não "Introdução").
+9. **`chapter_tag`** preenchido como **frase de benefício** em **cada produto** (vira a lista de benefícios dos capítulos).

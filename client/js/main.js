@@ -143,9 +143,12 @@ function initCapitulos() {
             var ts = row.getAttribute("data-ts") || "";
             var input = row.querySelector(".chap-tag");
             var val = input ? input.value.trim() : "";
+            // Sem benefício preenchido → cai no nome, pra a lista de benefícios
+            // ficar completa (todo timestamp presente, igual à de nomes).
+            if (!val) val = (row.querySelector(".chap-name") || {}).textContent || "";
             if (val) lines.push(ts + " " + val);
         });
-        if (!lines.length) { if (status) status.textContent = "nenhum benefício preenchido"; return; }
+        if (!lines.length) { if (status) status.textContent = "nada pra copiar"; return; }
         _copyText(lines.join("\n"), status);
     });
 
@@ -501,6 +504,18 @@ function initRecursos() {
     if (driveKeyEl) {
         try { driveKeyEl.value = localStorage.getItem(DRIVE_KEY_STORAGE) || ""; } catch (e) {}
         driveKeyEl.addEventListener("change", function () { try { localStorage.setItem(DRIVE_KEY_STORAGE, driveKeyEl.value.trim()); } catch (e) {} });
+    }
+
+    // Gemini: chave (global, neste PC) + lista de produtos (lembrada por projeto).
+    var gemKeyEl = document.getElementById("gemini-apikey");
+    if (gemKeyEl) {
+        try { gemKeyEl.value = localStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch (e) {}
+        gemKeyEl.addEventListener("change", function () { try { localStorage.setItem(GEMINI_KEY_STORAGE, gemKeyEl.value.trim()); } catch (e) {} });
+    }
+    var gemProdEl = document.getElementById("gemini-products");
+    if (gemProdEl) {
+        try { gemProdEl.value = localStorage.getItem(_geminiProductsKey()) || ""; } catch (e) {}
+        gemProdEl.addEventListener("input", function () { try { localStorage.setItem(_geminiProductsKey(), gemProdEl.value); } catch (e) {} });
     }
     var driveBtn = document.getElementById("btn-drive-import");
     if (driveBtn) driveBtn.addEventListener("click", function () {
@@ -1371,6 +1386,15 @@ function recBaseName(path) {
 // produto PROD_N (pré-marcando o .png como referência) e enfileira os vídeos.
 // Acesso: API key do Google (Drive API) + pasta compartilhada "qualquer um c/ link".
 var DRIVE_KEY_STORAGE = "autoeditor_drive_apikey";
+
+// Geração do mapeamento via Gemini (fallback quando não há *_autoeditor.json).
+// 2.5-flash é o que roda no free tier (2.5-pro exige billing). Chave salva
+// neste PC; lista de produtos lembrada por projeto.
+var GEMINI_KEY_STORAGE = "autoeditor_gemini_apikey";
+var GEMINI_MODEL = "gemini-2.5-flash";
+function _geminiProductsKey() { return (typeof _projectKey !== "undefined" && _projectKey ? _projectKey : "default") + "_gemini_products"; }
+function getGeminiKey() { try { return (localStorage.getItem(GEMINI_KEY_STORAGE) || "").trim(); } catch (e) { return ""; } }
+function getGeminiProducts() { var el = document.getElementById("gemini-products"); return el ? (el.value || "").trim() : ""; }
 
 // Extrai o ID da pasta de um link do Drive ou aceita o ID puro.
 function _driveExtractFolderId(input) {
@@ -2861,8 +2885,8 @@ function loadJSONsFromProjectFolder() {
     function reenable() { if (btn) btn.disabled = false; }
 
     cs.evalScript("getProjectDir()", function (rawPrj) {
-        var prjDir = "";
-        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; } catch (e) {}
+        var prjDir = "", seqName = "";
+        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; seqName = rp.seq || ""; } catch (e) {}
         if (!prjDir) { log("Salve o projeto primeiro — preciso da pasta do .prproj pra buscar os JSONs.", "error"); reenable(); return; }
 
         var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
@@ -2894,7 +2918,7 @@ function loadJSONsFromProjectFolder() {
                 pickTranscript(0);
             });
         } else {
-            log("Nenhum *_autoeditor.json na pasta — pulei o mapeamento.", "warn");
+            log("Nenhum *_autoeditor.json na pasta — se houver chave + lista do Gemini, gero após carregar a transcrição.", "warn");
             pickTranscript(0);
         }
 
@@ -2913,12 +2937,208 @@ function loadJSONsFromProjectFolder() {
                     loadTranscriptContent(content, cand.path);
                     _savedTranscriptPath = cand.path;
                     saveProjectData();
-                    reenable();
+                    // Sem mapeamento na pasta → gera com o Gemini (usa a transcrição
+                    // recém-carregada + a lista de produtos colada na seção 🤖).
+                    if (!mapFile) {
+                        maybeGenerateMappingViaGemini(content, prjDir, seqName, reenable);
+                    } else {
+                        reenable();
+                    }
                 } else {
                     pickTranscript(idx + 1);
                 }
             });
         }
+    });
+}
+
+// ─── GERAÇÃO DO MAPEAMENTO VIA GEMINI ───────────────────────────────────────
+// Fallback do "Carregar da pasta": se não houver *_autoeditor.json, gera o
+// mapeamento com o Gemini (transcrição + lista de produtos + AGENT_PROMPT.md),
+// valida os after_phrase, salva <seq>_autoeditor.json na pasta e aplica.
+
+// Reconstrói o texto bruto da narração a partir do JSON de transcrição do
+// Premiere (palavra a palavra) — é o que o Gemini recebe pra extrair os
+// after_phrase literais. Fallback: SRT/VTT.
+function reconstructTranscriptText(content) {
+    try {
+        var data = JSON.parse(content);
+        if (data && data.segments) {
+            var parts = [];
+            data.segments.forEach(function (seg) {
+                (seg.words || []).forEach(function (w) { if (w.type === "word" && w.text) parts.push(w.text); });
+            });
+            if (parts.length) return parts.join(" ");
+        }
+    } catch (e) {}
+    try { var ent = parseSRT(content); if (ent.length) return ent.map(function (e) { return e.text; }).join(" "); } catch (e2) {}
+    return String(content || "");
+}
+
+// Lê o AGENT_PROMPT.md embutido na extensão (system prompt do Gemini).
+function readAgentPrompt() {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    if (!fs || !extDir) return "";
+    var p = pmod ? pmod.join(extDir, "AGENT_PROMPT.md") : (extDir + "/AGENT_PROMPT.md");
+    try { return fs.readFileSync(p, "utf8"); } catch (e) { return ""; }
+}
+
+// Nome da sequência → nome de arquivo (espaços → _, remove inválidos).
+function _sanitizeSeqName(seq) {
+    var s = String(seq || "").replace(/[\\\/:*?"<>|]+/g, "").replace(/\s+/g, "_").replace(/^_+|_+$/g, "");
+    return s || "mapeamento";
+}
+
+// Coleta todos os after_phrase/start/end de um mapeamento (pra validar).
+function _collectMappingPhrases(m) {
+    var out = [];
+    (m.products || []).forEach(function (p) {
+        (p.timeline || []).forEach(function (it) { if (it.after_phrase) out.push(it.after_phrase); });
+        (p.lower_thirds || []).forEach(function (lt) { if (lt.after_phrase) out.push(lt.after_phrase); });
+    });
+    if (m.conclusion && m.conclusion.recap) m.conclusion.recap.forEach(function (r) { if (r.after_phrase) out.push(r.after_phrase); });
+    if (m.conclusion && m.conclusion.end_phrase) out.push(m.conclusion.end_phrase);
+    (m.key_points || []).forEach(function (k) { if (k.after_phrase) out.push(k.after_phrase); });
+    if (m.global_fill) {
+        (m.global_fill.segments || []).forEach(function (s) { if (s.start_phrase) out.push(s.start_phrase); });
+        if (m.global_fill.end_phrase) out.push(m.global_fill.end_phrase);
+    }
+    return out;
+}
+
+// Valida os after_phrase contra a transcrição carregada (transcriptWords),
+// usando findPhraseTime — a MESMA regra do mount. Retorna {total, ok, fails}.
+function _validateMappingPhrases(m) {
+    var phrases = _collectMappingPhrases(m), fails = [], ok = 0;
+    phrases.forEach(function (p) {
+        var t = null; try { t = findPhraseTime(p); } catch (e) { t = null; }
+        if (t === null || t === undefined) fails.push(p); else ok++;
+    });
+    return { total: phrases.length, ok: ok, fails: fails };
+}
+
+function _stripJSONFences(s) {
+    return String(s || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+}
+
+// Chama o Gemini (generateContent) com system prompt + texto do usuário.
+// cb(errOrNull, mappingTextString). Re-tenta sozinho em erros TRANSITÓRIOS
+// (503/UNAVAILABLE, 429/RESOURCE_EXHAUSTED, rede) com backoff — o 503 de "alta
+// demanda" é comum e some na 2ª/3ª tentativa.
+var GEMINI_MAX_ATTEMPTS = 5;
+function _callGemini(systemPrompt, userText, cb, _attempt) {
+    var https = tryNodeRequire('https');
+    if (!https) { cb("Node 'https' indisponível no CEP.", null); return; }
+    var attempt = _attempt || 1;
+    var body = JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: userText }] }],
+        generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
+    });
+    var len; try { len = Buffer.byteLength(body); } catch (e) { len = body.length; }
+
+    function retryOrFail(reason, retryable) {
+        if (retryable && attempt < GEMINI_MAX_ATTEMPTS) {
+            var wait = 3000 * attempt; // 3s, 6s, 9s, 12s
+            log("Gemini ocupado (" + reason + ") — re-tentando (" + (attempt + 1) + "/" + GEMINI_MAX_ATTEMPTS + ") em " + (wait / 1000) + "s…", "warn");
+            setTimeout(function () { _callGemini(systemPrompt, userText, cb, attempt + 1); }, wait);
+        } else {
+            cb(reason, null);
+        }
+    }
+
+    var req = https.request({
+        hostname: "generativelanguage.googleapis.com",
+        path: "/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(getGeminiKey()),
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": len }
+    }, function (res) {
+        var data = "";
+        res.on("data", function (d) { data += d; });
+        res.on("end", function () {
+            var r; try { r = JSON.parse(data); } catch (e) { retryOrFail("resposta não-JSON (HTTP " + res.statusCode + ")", res.statusCode === 503 || res.statusCode === 429); return; }
+            if (r.error) {
+                var code = r.error.code, st = String(r.error.status || "");
+                var retryable = (code === 503 || code === 429 || st === "UNAVAILABLE" || st === "RESOURCE_EXHAUSTED" || st === "INTERNAL");
+                retryOrFail("erro " + (code || "") + ": " + String(r.error.message || "").slice(0, 150), retryable);
+                return;
+            }
+            var cand = (r.candidates || [])[0];
+            if (!cand) { retryOrFail("não retornou conteúdo", true); return; }
+            var txt = ((cand.content && cand.content.parts) || []).map(function (p) { return p.text || ""; }).join("");
+            if (!txt) { retryOrFail("retornou vazio (finishReason: " + (cand.finishReason || "?") + ")", cand.finishReason !== "MAX_TOKENS"); return; }
+            cb(null, txt);
+        });
+    });
+    req.on("error", function (e) { retryOrFail("rede: " + e.message, true); });
+    try { req.write(body); req.end(); } catch (e) { retryOrFail("envio: " + e.message, true); }
+}
+
+// Fluxo completo: gera → valida → (1 retry corretivo) → salva → aplica.
+function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done) {
+    function finish() { if (typeof done === "function") done(); }
+    var key = getGeminiKey(), products = getGeminiProducts();
+    if (!key) { log("Sem *_autoeditor.json e sem chave do Gemini — configure a chave na seção 🤖 pra gerar automaticamente.", "warn"); finish(); return; }
+    if (!products) { log("Sem *_autoeditor.json — cole a lista de produtos na seção 🤖 pra eu gerar com o Gemini.", "warn"); finish(); return; }
+
+    var systemPrompt = readAgentPrompt();
+    if (!systemPrompt) { log("Não achei o AGENT_PROMPT.md na extensão — não dá pra gerar com o Gemini.", "error"); finish(); return; }
+
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    var outPath = pmod ? pmod.join(prjDir, _sanitizeSeqName(seqName) + "_autoeditor.json")
+                       : (prjDir + "/" + _sanitizeSeqName(seqName) + "_autoeditor.json");
+    var transcriptText = reconstructTranscriptText(transcriptContent);
+
+    var userText =
+        "## LISTA DE PRODUTOS (na ordem do vídeo)\n" + products +
+        "\n\n## TRANSCRIÇÃO (narração — os after_phrase devem ser trechos LITERAIS e consecutivos daqui)\n" + transcriptText +
+        "\n\nGere AGORA somente o objeto JSON de mapeamento.";
+
+    log("Sem mapeamento na pasta — gerando com o Gemini (" + GEMINI_MODEL + ")… pode levar ~30-60s.");
+
+    _callGemini(systemPrompt, userText, function (err, txt) {
+        if (err) { log("Gemini: " + err, "error"); finish(); return; }
+        var m; try { m = JSON.parse(_stripJSONFences(txt)); } catch (e) { log("Gemini devolveu JSON inválido: " + e.message, "error"); finish(); return; }
+
+        var v = _validateMappingPhrases(m);
+        log("Gemini gerou o mapeamento — after_phrase: " + v.ok + "/" + v.total + " casaram.", v.fails.length ? "warn" : "ok");
+
+        function logUnresolved(fails) {
+            if (!fails || !fails.length) return;
+            log("⚠ " + fails.length + " after_phrase NÃO casaram (esses elementos podem não ser posicionados):", "warn");
+            fails.forEach(function (f) { log("   • " + f, "warn"); });
+            log("Pra corrigir: ajuste essas frases no JSON salvo, ou clique de novo (apague o *_autoeditor.json) pra o Gemini tentar de novo.", "warn");
+        }
+
+        function saveAndApply(mapObj, finalFails) {
+            var content = JSON.stringify(mapObj, null, 2);
+            try { if (fs) fs.writeFileSync(outPath, content, "utf8"); log("Mapeamento salvo: " + outPath, "ok"); }
+            catch (e) { log("Não consegui salvar o mapeamento: " + e.message, "warn"); }
+            try { _applyMappingContent(content, outPath); }
+            catch (e2) { log("Erro ao aplicar o mapeamento gerado: " + e2.message, "error"); }
+            logUnresolved(finalFails);
+            finish();
+        }
+
+        if (!v.fails.length) { saveAndApply(m, []); return; }
+
+        // 1 rodada corretiva: manda só as frases que não casaram pra corrigir.
+        log("Re-perguntando ao Gemini pra corrigir " + v.fails.length + " frase(s) que não casaram…", "warn");
+        var fixText =
+            "O JSON que você gerou tem after_phrase que NÃO casam literalmente com a transcrição. " +
+            "Corrija SOMENTE esses trechos, usando palavras consecutivas EXATAS da transcrição (mantendo a posição/intenção). " +
+            "Devolva o JSON COMPLETO corrigido.\n\n## FRASES QUE NÃO CASARAM\n" +
+            v.fails.map(function (f) { return "- " + f; }).join("\n") +
+            "\n\n## TRANSCRIÇÃO\n" + transcriptText +
+            "\n\n## JSON ATUAL\n" + JSON.stringify(m);
+        _callGemini(systemPrompt, fixText, function (err2, txt2) {
+            if (err2) { log("Correção falhou (" + err2 + ") — salvando a versão original.", "warn"); saveAndApply(m, v.fails); return; }
+            var m2; try { m2 = JSON.parse(_stripJSONFences(txt2)); } catch (e) { log("Correção com JSON inválido — salvando a original.", "warn"); saveAndApply(m, v.fails); return; }
+            var v2 = _validateMappingPhrases(m2);
+            log("Após correção — after_phrase: " + v2.ok + "/" + v2.total + " casaram.", v2.fails.length ? "warn" : "ok");
+            if (v2.ok >= v.ok) saveAndApply(m2, v2.fails); else saveAndApply(m, v.fails);
+        });
     });
 }
 
