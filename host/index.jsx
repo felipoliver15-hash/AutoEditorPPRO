@@ -7,6 +7,13 @@ var TICKS_PER_SECOND = 254016000000;
 // pra updateTemplatePlaceholders, que então anexa ao log retornado pra UI.
 var _globalScaleLog = null;
 
+// IMAGENS de produto são dimensionadas em modo "fit" (cabem inteiras no frame,
+// nunca cortam) — normaliza qualquer resolução pro mesmo encaixe. VÍDEOS seguem
+// em "fill" (cobrem o frame). _AE_FIT_MARGIN < 1 deixa respiro nas bordas
+// (1.0 = encosta na borda; ex. 0.9 = 90% do frame). Ajuste único aqui.
+var _AE_FIT_MARGIN = 0.85;
+function _AE_isImagePath(p) { return /\.(png|jpe?g|webp|gif|bmp|tif?f)$/i.test(String(p || "")); }
+
 function toTicks(seconds) {
     return String(Math.round(seconds * TICKS_PER_SECOND));
 }
@@ -1840,8 +1847,9 @@ function applyAnimation(clip, animationType, baseScaleHint) {
 // Usadas com prioridade se passadas. Caso contrário, tenta extrair via XMP/footage.
 //
 // Retorna { ok, method, scale } pra log.
-function applyScaleToFrameSize(seq, track, startTimeTicks, hintSrcW, hintSrcH) {
+function applyScaleToFrameSize(seq, track, startTimeTicks, hintSrcW, hintSrcH, fitMode) {
     var result = { ok: false, method: "none" };
+    var _fit = (fitMode === "fit");
 
     // ── Encontra o clip JS na track ────────────────────────────────────────
     // O Premiere faz snap pra frame boundary — o tick salvo pode diferir do que
@@ -1935,9 +1943,17 @@ function applyScaleToFrameSize(seq, track, startTimeTicks, hintSrcW, hintSrcH) {
         } catch(eDim) {}
 
         if (srcW > 0 && srcH > 0 && seqW > 0 && seqH > 0) {
-            // FILL (cobre todo o frame, pode cortar) = max ratio, com 1% de margem
-            // de segurança pra eliminar bordas finas que podem ficar por arredondamento.
-            var ratio = Math.max(seqW / srcW, seqH / srcH) * 1.01;
+            var ratio;
+            if (_fit) {
+                // FIT (cabe inteira no frame, nunca corta) = min ratio. Normaliza
+                // QUALQUER resolução pro mesmo encaixe — resolve as imagens de
+                // produto que vinham grandes demais (ex. quadradas a ~189%).
+                ratio = Math.min(seqW / srcW, seqH / srcH) * _AE_FIT_MARGIN;
+            } else {
+                // FILL (cobre todo o frame, pode cortar) = max ratio, com 1% de margem
+                // de segurança pra eliminar bordas finas por arredondamento. (vídeo/fundo)
+                ratio = Math.max(seqW / srcW, seqH / srcH) * 1.01;
+            }
             var scalePct = ratio * 100;
 
             // Lista nomes possíveis do componente Motion (varia por locale)
@@ -2062,9 +2078,11 @@ function insertMediaAtTime(filePath, trackIndex, startSec, durationSec, animatio
             }
         }
 
-        // 1. Aplica "Scale to Frame Size" PRIMEIRO — define a escala base (~142%).
+        // 1. Aplica "Scale to Frame Size" PRIMEIRO — define a escala base.
+        //    Imagem → "fit" (cabe inteira); vídeo → "fill" (cobre o frame).
+        var _fitMode = _AE_isImagePath(filePath) ? "fit" : "fill";
         var sfRes = { method: "skipped" };
-        try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH); } catch(eSF) { sfRes = { method: "err: " + eSF.message }; }
+        try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH, _fitMode); } catch(eSF) { sfRes = { method: "err: " + eSF.message }; }
 
         // 2. Aplica animação DEPOIS — passa a baseScale explicitamente (do resultado
         //    do scale-to-frame) pra não depender de scaleProp.getValue() que às
@@ -3350,8 +3368,12 @@ function captureClipMotion(clip) {
 // Aplica propriedades visuais capturadas em um clip. Mantém defaults pra Scale=100
 // estático (assim scale-to-frame não é sobrescrito por placeholder com Scale default).
 // Keyframes SEMPRE são aplicados (animação do placeholder transfere pra imagem).
-function applyClipMotion(clip, data) {
+function applyClipMotion(clip, data, motionScaleFactor) {
     if (!data || !data.components || !clip || !clip.components) return;
+    // Fator do scale-to-frame (fit): o Scale do Motion é ABSOLUTO (% do quadro);
+    // multiplicamos pra imagem ocupar a MESMA fração do quadro que o placeholder
+    // previa, em qualquer resolução. 1 = sem ajuste (fallback).
+    var sf = (typeof motionScaleFactor === "number" && motionScaleFactor > 0) ? motionScaleFactor : 1;
     try {
         for (var c = 0; c < clip.components.numItems; c++) {
             var comp = clip.components[c];
@@ -3374,6 +3396,13 @@ function applyClipMotion(clip, data) {
                     continue;
                 }
 
+                // Scale do Motion é ABSOLUTO (% do quadro). Multiplica pelo fit (sf)
+                // pra a imagem ocupar a mesma fração que o placeholder previa, em
+                // qualquer resolução. Sem isto, a animação de Scale (keyframes) do
+                // placeholder jogava a imagem de volta pro tamanho nativo (gigante).
+                var isMotionScale = (cname === "Motion" || cname === "Movimento") &&
+                                    (pname === "Scale" || pname === "Escala");
+
                 if (pdata.isTimeVarying && pdata.keys && pdata.keys.length > 0) {
                     // Aplica TODAS as keyframes (animação preservada)
                     try { prop.setTimeVarying(true); } catch(eTV) {}
@@ -3381,14 +3410,19 @@ function applyClipMotion(clip, data) {
                         var kf = pdata.keys[k];
                         var t = new Time();
                         t.ticks = String(kf.ticks);
+                        var kval = kf.value;
+                        if (isMotionScale && typeof kval === "number") kval = kval * sf;
                         try { prop.addKey(t); } catch(eAdd) {}
-                        try { prop.setValueAtKey(t, kf.value, true); } catch(eSet) {}
+                        try { prop.setValueAtKey(t, kval, true); } catch(eSet) {}
                     }
                 } else if (pdata.value !== undefined && pdata.value !== null) {
-                    // Static: skip Scale=100 default (deixa scale-to-frame agir)
-                    var isMotionScale = (cname === "Motion" || cname === "Movimento") &&
-                                        (pname === "Scale" || pname === "Escala");
-                    if (isMotionScale && pdata.value === 100) continue;
+                    if (isMotionScale) {
+                        // Sem fit conhecido (sf=1) e Scale=100 default → deixa o
+                        // scale-to-frame agir. Senão aplica o valor × fit.
+                        if (sf === 1 && pdata.value === 100) continue;
+                        try { prop.setValue(pdata.value * sf, true); } catch(eV) {}
+                        continue;
+                    }
                     // Skip Opacity=100 default também
                     var isOpacityProp = (cname === "Opacity" || cname === "Opacidade") &&
                                         (pname === "Opacity" || pname === "Opacidade");
@@ -3400,7 +3434,7 @@ function applyClipMotion(clip, data) {
     } catch(eA) {}
 }
 
-function replaceClipWithImage(track, clip, imagePath, hintSrcW, hintSrcH) {
+function replaceClipWithImage(track, clip, imagePath, hintSrcW, hintSrcH, ownerSeqArg) {
     try {
         var startTime = new Time();
         startTime.ticks = clip.start.ticks;
@@ -3445,15 +3479,23 @@ function replaceClipWithImage(track, clip, imagePath, hintSrcW, hintSrcH) {
         // (precisa descobrir qual sequência é dona dessa track)
         var sfInfo = null;
         try {
-            var ownerSeq = null;
-            for (var si = 0; si < app.project.sequences.numSequences; si++) {
-                var sq = app.project.sequences[si];
-                for (var ti = 0; ti < sq.videoTracks.numTracks; ti++) {
-                    if (sq.videoTracks[ti] === track) { ownerSeq = sq; break; }
+            // Sequência dona: usa a passada pelo caller (confiável). Só cai na busca
+            // por identidade de objeto se não vier — essa busca FALHAVA na sequência
+            // clonada do template, então o scale-to-frame nunca rodava e a imagem
+            // ficava no tamanho nativo (100%) → produtos grandes/inconsistentes.
+            var ownerSeq = ownerSeqArg || null;
+            if (!ownerSeq) {
+                for (var si = 0; si < app.project.sequences.numSequences; si++) {
+                    var sq = app.project.sequences[si];
+                    for (var ti = 0; ti < sq.videoTracks.numTracks; ti++) {
+                        if (sq.videoTracks[ti] === track) { ownerSeq = sq; break; }
+                    }
+                    if (ownerSeq) break;
                 }
-                if (ownerSeq) break;
             }
-            if (ownerSeq) sfInfo = applyScaleToFrameSize(ownerSeq, track, startTime.ticks, hintSrcW, hintSrcH);
+            // PNG transparente do produto → sempre "fit" (cabe inteiro, não corta).
+            if (ownerSeq) sfInfo = applyScaleToFrameSize(ownerSeq, track, startTime.ticks, hintSrcW, hintSrcH, "fit");
+            else sfInfo = { method: "ownerSeq-not-found" };
         } catch(eSF) { sfInfo = { method: "err: " + eSF.message }; }
 
         // Aplica as propriedades capturadas do placeholder na imagem.
@@ -3461,7 +3503,11 @@ function replaceClipWithImage(track, clip, imagePath, hintSrcW, hintSrcH) {
         // - Valores estáticos transferem EXCETO Scale=100 e Opacity=100 (defaults),
         //   pra não sobrescrever scale-to-frame com 100% padrão.
         if (newClipRef && capturedMotion) {
-            try { applyClipMotion(newClipRef, capturedMotion); } catch(eAM) {}
+            // Passa o fator do scale-to-frame pra o Scale do placeholder (inclusive
+            // animado por keyframes) ser multiplicado pelo fit → tamanho consistente
+            // independente da resolução da imagem.
+            var _msf = (sfInfo && typeof sfInfo.scale === "number" && sfInfo.scale > 0) ? (sfInfo.scale / 100) : 1;
+            try { applyClipMotion(newClipRef, capturedMotion, _msf); } catch(eAM) {}
         }
 
         // Anexa info ao log GLOBAL temporário pra updateTemplatePlaceholders pegar
@@ -3801,7 +3847,8 @@ function updateTemplatePlaceholders(templateSeq, product, options) {
                 if (product.image_transparent) {
                     _globalScaleLog = []; // reseta pra capturar info desse replace
                     var ok = replaceClipWithImage(track, clip, product.image_transparent,
-                                                  product.image_transparent_w, product.image_transparent_h);
+                                                  product.image_transparent_w, product.image_transparent_h,
+                                                  templateSeq);
                     log.push("PRODUCT_IMAGE → " + (ok ? "ok (" + product.image_transparent + ")" : "falhou"));
                     if (_globalScaleLog && _globalScaleLog.length) {
                         for (var gs = 0; gs < _globalScaleLog.length; gs++) log.push("  " + _globalScaleLog[gs]);
@@ -5079,8 +5126,11 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
             try { actualEnd = parseFloat(bestClip.end.ticks) / TICKS_PER_SECOND; } catch (eAE) {}
         }
 
+        // Imagem de produto → "fit" (cabe inteira, normaliza qualquer resolução);
+        // vídeo → "fill" (cobre o frame, como antes).
+        var _fitMode = _AE_isImagePath(itemPath || name) ? "fit" : "fill";
         var sfRes = null;
-        try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH); } catch (eSF) {}
+        try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH, _fitMode); } catch (eSF) {}
 
         // Efeito de fundo borrado pra vídeos verticais/quadrados (não pra imagens).
         // (projectItem ainda está recortado aqui → camada de cima herda a janela.)
