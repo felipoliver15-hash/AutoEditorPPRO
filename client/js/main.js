@@ -1396,6 +1396,47 @@ function _geminiProductsKey() { return (typeof _projectKey !== "undefined" && _p
 function getGeminiKey() { try { return (localStorage.getItem(GEMINI_KEY_STORAGE) || "").trim(); } catch (e) { return ""; } }
 function getGeminiProducts() { var el = document.getElementById("gemini-products"); return el ? (el.value || "").trim() : ""; }
 
+// Serializa downloads entre PRODUTOS. A importação do Drive cria vários cards e
+// cada um dispararia seu downloadUrlQueue AO MESMO TEMPO → vários yt-dlp/ffmpeg
+// concorrentes, modais de seleção colidindo e downloads travando sem erro (foi o
+// que segurou o PROD_4). Aqui as tarefas rodam UMA POR VEZ: cada uma recebe um
+// done() que DEVE ser chamado ao terminar; a próxima só começa depois.
+var _dlQueue = [], _dlRunning = false;
+
+// Decide se vale re-tentar um download que falhou. SÓ erros transitórios
+// (captcha intermitente da Amazon "Unable to extract data", rede, 5xx/429).
+// Erros PERMANENTES (Unsupported URL, vídeo indisponível, formato inexistente,
+// login) NÃO re-tentam — re-tentar só desperdiça tempo.
+function _isRetryableDlError(msg) {
+    msg = String(msg || "").toLowerCase();
+    if (/unsupported url|not available|unavailable|private video|requested format|no video formats?|sign in|login required|members-only|geo[- ]?restrict|removed/.test(msg)) return false;
+    if (/unable to extract|http error 5\d\d|http error 429|\b503\b|\b429\b|timed out|temporar|connection|network|read timed|reset by peer|getaddrinfo|econn|socket hang/.test(msg)) return true;
+    return false; // desconhecido → não re-tenta (evita loop em erro permanente)
+}
+
+// Dica quando o link é uma PÁGINA de produto (Shopee/Mercado Livre), que o
+// downloader não baixa. URLs de CDN de mídia (susercontent/mlstatic) baixam normal.
+function _productPageHint(url) {
+    var u = String(url || "").toLowerCase();
+    var isProductPage = /shopee\.com|mercadolivre\.com|mercadolibre\./.test(u) && !/susercontent\.com|mlstatic\.com/.test(u);
+    if (isProductPage) {
+        return "Esse é um link de PÁGINA de produto (Shopee/Mercado Livre) — o downloader não baixa direto. " +
+               "Use a extensão AutoEditor (clique direito no vídeo → Copiar URL) e ponha a URL .mp4/.m3u8 no .txt.";
+    }
+    return "";
+}
+
+function enqueueDownloadTask(taskFn) { _dlQueue.push(taskFn); _dlPump(); }
+function _dlPump() {
+    if (_dlRunning) return;
+    var task = _dlQueue.shift();
+    if (!task) return;
+    _dlRunning = true;
+    var doneCalled = false;
+    function done() { if (doneCalled) return; doneCalled = true; _dlRunning = false; _dlPump(); }
+    try { task(done); } catch (e) { done(); }
+}
+
 // Extrai o ID da pasta de um link do Drive ou aceita o ID puro.
 function _driveExtractFolderId(input) {
     var s = String(input || "").trim();
@@ -1620,7 +1661,15 @@ function renderProductCard(n, opts) {
         if (opts.refPath) refPath = opts.refPath;
         renderList();
         setCollapsed(false);
-        if (opts.videoLinks && opts.videoLinks.length) downloadUrlQueue(opts.videoLinks);
+        // Serializa: cada card do Drive entra na fila global e baixa na sua vez
+        // (evita N downloads/modais concorrentes que travavam um dos produtos).
+        // setBusy(true) JÁ aqui: trava o "Criar" deste produto enquanto ele espera
+        // na fila (antes só travava o que baixava no momento) — só libera quando a
+        // vez dele baixar terminar (downloadUrlQueue chama setBusy(false) no fim).
+        if (opts.videoLinks && opts.videoLinks.length) {
+            setBusy(true);
+            enqueueDownloadTask(function (done) { downloadUrlQueue(opts.videoLinks, done); });
+        }
     } else {
         _pendingProductCard = card;
     }
@@ -1773,7 +1822,7 @@ function renderProductCard(n, opts) {
         if (txts.length) {
             var urls = [];
             txts.forEach(function (tp) { urls = urls.concat(readLinksFromTxt(tp)); });
-            if (urls.length) downloadUrlQueue(urls);
+            if (urls.length) enqueueDownloadTask(function (done) { downloadUrlQueue(urls, done); });
             else recLog("Nenhum link http(s) encontrado no(s) .txt.", "warn");
         }
     }
@@ -1794,7 +1843,7 @@ function renderProductCard(n, opts) {
 
     // Baixa uma lista de URLs EM FILA (uma de cada vez) na pasta do produto.
     // Cada vídeo baixado entra no staging automaticamente.
-    function downloadUrlQueue(urls) {
+    function downloadUrlQueue(urls, onAllDone) {
         ytBtn.disabled = true; ytIn.disabled = true;
         setBusy(true);
         var origLabel = ytBtn.textContent;
@@ -1806,16 +1855,35 @@ function renderProductCard(n, opts) {
                 setBusy(false);
                 recLog("✓ Fila concluída: " + ok + " baixado(s)" + (failed ? ", " + failed + " falhou" : "") + ".",
                        failed ? "warn" : "ok");
+                if (typeof onAllDone === "function") onAllDone();
                 return;
             }
             var url = urls[i];
             ytBtn.textContent = "Fila " + (i + 1) + "/" + urls.length + "…";
             recLog("Fila " + (i + 1) + "/" + urls.length + ": " + url.substring(0, 70) + (url.length > 70 ? "…" : ""));
+            attempt(url, 1);
+        }
+        // Tenta baixar a URL; em falha (ex: captcha intermitente da Amazon
+        // "Unable to extract data") re-tenta a invocação inteira até 3x com pausa
+        // — uma sessão nova depois costuma passar onde os retries internos falharam.
+        var URL_ATTEMPTS = 3;
+        function attempt(url, tryNo) {
             downloadYTToFolder(n, url,
                 function onProgress(label) { ytBtn.textContent = (i + 1) + "/" + urls.length + " " + label; },
                 function onDone(err, filePath) {
-                    if (err) { failed++; recLog("✗ link " + (i + 1) + ": " + err.message, "err"); }
-                    else { var ps = [].concat(filePath); ok += ps.length; addPaths(ps); }
+                    if (err) {
+                        // Só re-tenta erro TRANSITÓRIO (captcha Amazon, rede, 5xx).
+                        if (tryNo < URL_ATTEMPTS && _isRetryableDlError(err.message)) {
+                            recLog("✗ link " + (i + 1) + " (tentativa " + tryNo + "/" + URL_ATTEMPTS + "): " + err.message + " — re-tentando em 10s…", "warn");
+                            setTimeout(function () { attempt(url, tryNo + 1); }, 10000);
+                            return;
+                        }
+                        failed++; recLog("✗ link " + (i + 1) + ": " + err.message, "err");
+                        var hint = _productPageHint(url);
+                        if (hint) recLog("  ↳ " + hint, "warn");
+                    } else {
+                        var ps = [].concat(filePath); ok += ps.length; addPaths(ps);
+                    }
                     i++; next();
                 },
                 chooseVideosModal
@@ -1853,7 +1921,7 @@ function renderProductCard(n, opts) {
         if (!raw) { recLog("Cole uma URL primeiro.", "warn"); return; }
         // Aceita VÁRIOS links colados (1 por linha ou separados por espaço) → fila.
         var multi = (raw.match(/https?:\/\/\S+/g) || []);
-        if (multi.length > 1) { ytIn.value = ""; downloadUrlQueue(multi); return; }
+        if (multi.length > 1) { ytIn.value = ""; enqueueDownloadTask(function (done) { downloadUrlQueue(multi, done); }); return; }
         var url = multi.length ? multi[0] : raw;
         ytBtn.disabled = true; ytIn.disabled = true;
         setBusy(true);
