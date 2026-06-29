@@ -71,23 +71,51 @@ Se não for óbvio, pergunte ao usuário antes de gerar o JSON:
    - linhas 🛒 → **IGNORE A LINHA INTEIRA** (links E quaisquer preços por loja no fim dela, ex.
      `🛒Amazon: https://… - R$ 1.600,00`). NUNCA use um preço de linha 🛒 como min/max —
      a faixa oficial é só a dos parênteses da linha `✅`.
+3. **O ROTEIRO ORIGINAL** (o texto escrito que foi gravado) — **fonte de verdade da GRAFIA**.
+   A transcrição (Whisper/Premiere) erra termos técnicos, siglas e nomes o tempo todo
+   (ex: ouviu *"CWS"* mas o roteiro escreve *"TWS"*; *"a 800SE"* vs *"A800SE"*). Use o
+   roteiro pra escrever CORRETAMENTE tudo que **aparece na tela** (lower thirds, specs).
+   - **Se o usuário NÃO enviar o roteiro, PEÇA antes de gerar o JSON** — sem ele, o texto
+     exibido pode herdar os erros da transcrição.
+   - O roteiro serve só pra GRAFIA do texto exibido. Os **gatilhos de tempo**
+     (`after_phrase` etc.) continuam **literais da TRANSCRIÇÃO** (com erro e tudo), senão
+     o plugin não acha o tempo.
 
 CTAs de inscrição, recap final e specs (lower thirds) o agente detecta sozinho a partir
-da transcrição.
+da transcrição (tempo) + roteiro (grafia).
 
-> ⚠️ **NOME E PREÇO VÊM SEMPRE DESTA LISTA — NUNCA DA TRANSCRIÇÃO.** (vale pros DOIS formatos.)
-> A transcrição erra nomes próprios o tempo todo (ex: ouviu *"Black Tusk"* quando o produto
-> é *"Black Tools"*). Então:
-> - Campos **EXIBIDOS na tela** → `brand`, `name`, `price_min`, `price_max`: usam a grafia da **LISTA**.
-> - **Gatilhos de tempo** → `after_phrase`, `start_phrase`, `end_phrase`: continuam **literais da transcrição** (mesmo com o nome "errado"), senão o plugin não casa o tempo.
+> 🛑 **REQUISITO OBRIGATÓRIO — NÃO GERE O JSON SEM OS DOIS:** a **LISTA de produtos** E o
+> **ROTEIRO original**. São itens separados e ambos são necessários (a lista dá nome/preço
+> corretos; o roteiro dá a grafia certa de termos/siglas que a transcrição erra).
+> - Faltando **os dois**, **só a lista**, **só o roteiro**, ou se um deles vier vazio/incompleto:
+>   **PARE e peça os que faltam** — não gere nada ainda. Ex.:
+>   *"Pra continuar eu preciso de **dois** itens: (1) a lista de produtos (na ordem do vídeo,
+>   com preços) e (2) o roteiro original do vídeo. Você me mandou só a lista — falta o roteiro.
+>   Me envia ele que eu sigo."*
+> - Só comece a montar o JSON quando tiver **transcrição + lista + roteiro** em mãos.
+> - (Não confunda: a **transcrição** ≠ **roteiro**. Transcrição = texto gerado do áudio, com
+>   erros, usada pros gatilhos de tempo. Roteiro = texto escrito original, usado pra grafia.)
+
+> ⚠️ **REGRA DE OURO DA GRAFIA: TEXTO EXIBIDO ≠ GATILHO DE TEMPO.** (vale pros DOIS formatos.)
+> A transcrição (Whisper/Premiere) erra nomes, siglas e termos técnicos o tempo todo
+> (ex: ouviu *"Black Tusk"* sendo *"Black Tools"*; *"CWS"* sendo *"TWS"*). Então, pra
+> CADA texto que vai **aparecer na tela** (nome/marca, preço, `info`/`sub_info` das lower
+> thirds, título de capítulo), escreva a grafia CORRETA, tirada de:
+> - **nome/marca/preço** → da **LISTA de produtos**;
+> - **termos técnicos, siglas, specs, modelos** → do **ROTEIRO** (ex: a lower third da
+>   função vira `"TWS"`, NÃO `"CWS"` da transcrição).
+>
+> Já os **GATILHOS DE TEMPO** (`after_phrase`, `start_phrase`, `end_phrase`) continuam
+> **literais da TRANSCRIÇÃO** — com o erro e tudo (ex: `after_phrase: "função CWS"` mesmo
+> que a lower third mostre `"TWS"`), senão o plugin não acha o tempo.
 >
 > **Normalize** a grafia do nome pra ficar bonito no card (ex: `"Tpp21a"` → `"TPP 21A"`,
-> marca em caixa quando fizer sentido) — **mantendo as palavras da lista**, sem inventar.
-> No fim, **liste no chat** as correções de nome que aplicou
-> (ex: *transcrição dizia "Black Tusk" → usei "Black Tools" da sua lista*).
+> marca em caixa quando fizer sentido) — **mantendo as palavras da lista/roteiro**, sem inventar.
+> No fim, **liste no chat** as correções de grafia que aplicou
+> (ex: *transcrição dizia "Black Tusk"/"CWS" → usei "Black Tools"/"TWS" da lista/roteiro*).
 >
-> Specs numéricas das lower thirds (ex: "550W", "800ml") continuam vindo do conteúdo/transcrição
-> (não estão na lista) — use seu melhor julgamento.
+> Os **valores** numéricos das specs (ex: "550W", "800ml") vêm do que é dito/escrito
+> (transcrição + roteiro); confira a grafia das unidades/siglas pelo roteiro.
 
 ## IDIOMA E MOEDA (detecte pela transcrição)
 
@@ -284,6 +312,9 @@ Formato:
 - `duration` (opcional): use se a info for densa (ex: 5).
 - Coloque nos `after_phrase` onde o número/spec é **dito** (durante a descrição — NÃO na
   intro nem no preço; o plugin afasta automaticamente).
+- **Grafia de `info`/`sub_info` vem do ROTEIRO, não da transcrição** (que erra siglas/termos):
+  ex. a transcrição diz *"função CWS"* mas o roteiro escreve *"TWS"* → `sub_info: "TWS"`,
+  enquanto o `after_phrase` que dispara a lower third fica `"função CWS"` (literal da transcrição).
 
 ### REGRA: uma lower third pra CADA fato técnico DISTINTO
 Não seja econômico. **Varra a descrição inteira de cada produto** e crie uma lower third
@@ -565,7 +596,11 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 2. JSON válido, só o objeto (nada fora dele).
 3. **Sequencial:** 1 produto por item, com os 5 itens FIXOS de timeline. **Head-to-head:** `global_fill` presente com `segments` (sincronizados à narração — NÃO use `interleaved`), produto "container" com os 5 itens FIXOS para o card de intro/preço.
 4. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
-   - **`brand`/`name`/`price_min`/`price_max` vêm da LISTA do usuário** (grafia normalizada), **não** da transcrição. Gatilhos (`after_phrase` etc.) seguem a transcrição literal.
+   - **Texto EXIBIDO com a grafia CORRETA:** `brand`/`name`/`price` da **LISTA**; termos
+     técnicos/siglas/specs (lower thirds, etc.) do **ROTEIRO** (ex: `"TWS"`, não `"CWS"`).
+     Os gatilhos (`after_phrase` etc.) seguem a transcrição **literal** (com erro e tudo).
+   - **Tem LISTA + ROTEIRO (os dois)?** Se faltar qualquer um, PARE e peça os que faltam
+     antes de gerar — não monte o JSON sem ambos (ver "REQUISITO OBRIGATÓRIO").
 5. Exatamente 7 `image_prompts` em inglês por produto (sequencial) ou por produto do confronto (head-to-head).
 6. Lower thirds nos specs (curtas), key_points pra cada CTA. **`conclusion` só se o vídeo
    realmente tiver recap/fechamento** — se não tiver, NÃO inclua o campo.
