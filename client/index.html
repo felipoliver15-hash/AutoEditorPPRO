@@ -27,7 +27,9 @@
   <!-- ── MONTAR ───────────────────────────────────────────── -->
   <div id="tab-montar" class="tab-content active">
 
-    <div class="section root-folder-section">
+    <!-- Stock videos: oculto da UI (lógica mantida dormente — pontos-chave com
+         stock_folder simplesmente pulam quando não há pasta configurada). -->
+    <div class="section root-folder-section" style="display:none">
       <label class="root-folder-label">Pasta de stock videos (opcional)</label>
       <div class="row-space">
         <input type="text" id="stock-folder" class="flex1 root-folder-input" placeholder="Opcional — para ilustrar pontos-chave com stock...">
@@ -36,7 +38,9 @@
       <div id="stock-folder-status" class="root-folder-hint">nenhuma pasta selecionada</div>
     </div>
 
-    <div class="section">
+    <!-- Sequência ativa: oculto (o plugin sempre usa app.project.activeSequence;
+         o display era só informativo). Elemento mantido pra não quebrar o JS. -->
+    <div class="section" style="display:none">
       <label>Sequência ativa</label>
       <div class="row-space">
         <div id="seq-name" class="info-box flex1">—</div>
@@ -57,7 +61,10 @@
       </details>
     </div>
 
-    <div class="section">
+    <!-- Carregar SRT manual: oculto — "Carregar da pasta do projeto" já acha a
+         transcrição. A leitura de SRT continua no código como fallback. O badge
+         srt-status é mantido (usado por loadTranscriptContent). -->
+    <div class="section" style="display:none">
       <label>Transcrição (SRT)</label>
       <div class="row-space">
         <button id="btn-load-srt">Carregar arquivo</button>
@@ -216,16 +223,40 @@
       </div>
     </div>
 
+    <!-- ── Áudio: corte de silêncio (port do SilenCut) ─────────────────── -->
+    <div class="section">
+      <label>Áudio — cortar silêncio</label>
+      <button id="btn-cut-silence" class="btn-primary" style="background:#3d2d5a">✂ Cortar silêncio e inserir na timeline</button>
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-top:6px;cursor:pointer">
+        <input type="checkbox" id="audio-auto"> Cortar automaticamente ao abrir o projeto
+      </label>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Procura o áudio na pasta do projeto e, se não houver, na pasta global <b>Music\AutoEditor</b>. Corta os silêncios (−45 dB / 0,30 s / margem 0,05 s) e insere o resultado na faixa A1. Se não houver áudio ainda, tenta de novo a cada 15 s.</div>
+    </div>
+
     <div class="section">
       <label>Produtos</label>
       <button id="btn-add-product" class="btn-primary">+ Adicionar Produto</button>
+      <button id="btn-retry-downloads" style="width:100%;margin-top:4px;background:#5a3d2d;color:#fff;border:none;border-radius:4px;padding:6px;cursor:pointer">↻ Re-tentar downloads que falharam</button>
       <details id="drive-import" style="margin-top:6px">
         <summary style="cursor:pointer;font-size:12px;color:#9cf">📁 Importar produtos do Google Drive</summary>
         <div style="margin-top:6px">
           <input type="password" id="drive-apikey" placeholder="API key do Google (Drive API)" style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
-          <div class="row-space">
-            <input type="text" id="drive-folder" class="flex1" placeholder="link ou ID da pasta-mãe do Drive" style="padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
-            <button id="btn-drive-import" style="min-width:90px">Importar</button>
+
+          <!-- Raiz (todos os canais) — cola uma vez. O plugin acha a pasta do
+               projeto pelo nome do .prproj (ex. "AT 05" → "AT - 5"). -->
+          <input type="text" id="drive-root" placeholder="link ou ID da pasta RAIZ (onde ficam todos os canais)" style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+          <button id="btn-drive-import-auto" class="btn-primary" style="width:100%;background:#2d5a3d;margin-bottom:4px">📂 Importar do projeto atual</button>
+          <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-bottom:6px;cursor:pointer">
+            <input type="checkbox" id="drive-auto-open"> Importar automaticamente ao abrir o projeto
+          </label>
+          <div class="hint" style="font-size:11px;color:#888;margin-bottom:8px">Acha a pasta do projeto pelo nome do .prproj (sigla+número, ex. "AT 05" → "AT - 5") dentro da raiz. O download retoma de onde parou se o Premiere fechar.</div>
+
+          <div style="border-top:1px solid #3a3a3a;padding-top:6px">
+            <div class="hint" style="font-size:10px;color:#777;margin-bottom:4px">ou manual — cole o ID/link da pasta do projeto:</div>
+            <div class="row-space">
+              <input type="text" id="drive-folder" class="flex1" placeholder="link ou ID da pasta do projeto (manual)" style="padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+              <button id="btn-drive-import" style="min-width:90px">Importar</button>
+            </div>
           </div>
           <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Cada subpasta "N - Nome" vira PROD_N (imagens + .txt de links). A pasta precisa estar compartilhada "qualquer pessoa com o link".</div>
         </div>

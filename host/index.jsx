@@ -5241,8 +5241,31 @@ function getProjectDir() {
         var i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
         var seq = "";
         try { seq = (app.project.activeSequence && app.project.activeSequence.name) ? String(app.project.activeSequence.name) : ""; } catch (eS) {}
-        return JSON.stringify({ dir: (i >= 0 ? p.substring(0, i) : ""), seq: seq });
+        // prj = nome do arquivo .prproj sem extensão (ex. "AT 05") — usado pra
+        // achar a pasta do projeto no Drive pelo nome (sigla+número).
+        var base = (i >= 0 ? p.substring(i + 1) : p);
+        var prj = base.replace(/\.[^.]+$/, "");
+        return JSON.stringify({ dir: (i >= 0 ? p.substring(0, i) : ""), seq: seq, prj: prj });
     } catch (e) { return JSON.stringify({ dir: "" }); }
+}
+
+// Importa um áudio (ex. o _cut.wav do corte de silêncio) e o coloca na 1ª faixa
+// de áudio (A1) da sequência ativa, no tempo startSec. Usado pelo corte de silêncio.
+function insertAudioOnTimeline(filePath, startSec) {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
+        var item = importAndGet(filePath);
+        if (!item) return JSON.stringify({ error: "Falha ao importar: " + filePath });
+        if (!seq.audioTracks || seq.audioTracks.numTracks < 1) return JSON.stringify({ error: "Sequência sem faixa de áudio." });
+        var t = new Time(); t.ticks = toTicks(startSec || 0);
+        var track = seq.audioTracks[0];
+        var placed = false;
+        try { track.overwriteClip(item, t); placed = true; } catch (eO) {}
+        if (!placed) { try { track.insertClip(item, t); placed = true; } catch (eI) {} }
+        if (!placed) return JSON.stringify({ error: "overwriteClip/insertClip falharam na faixa de áudio." });
+        return JSON.stringify({ success: true, track: "A1" });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
 }
 
 // ─── ABA RECURSOS (setup: bins de produto + sequências de template) ──────────

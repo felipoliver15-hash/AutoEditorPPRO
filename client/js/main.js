@@ -74,6 +74,7 @@ document.addEventListener("DOMContentLoaded", function () {
     initCapitulos();
     refreshSequenceInfo();
     initProjectPersistence();
+    _watchProjectChanges();
     initPluginUpdate();
 });
 
@@ -562,12 +563,42 @@ function copyRecLog() {
 function initRecursos() {
     var addBtn = document.getElementById("btn-add-product");
     if (addBtn) addBtn.addEventListener("click", startNewProductCard);
+    var retryBtn = document.getElementById("btn-retry-downloads");
+    if (retryBtn) retryBtn.addEventListener("click", retryFailedDownloads);
 
     // Importação do Google Drive: lembra a API key e dispara a importação.
     var driveKeyEl = document.getElementById("drive-apikey");
     if (driveKeyEl) {
         try { driveKeyEl.value = localStorage.getItem(DRIVE_KEY_STORAGE) || ""; } catch (e) {}
         driveKeyEl.addEventListener("change", function () { try { localStorage.setItem(DRIVE_KEY_STORAGE, driveKeyEl.value.trim()); } catch (e) {} });
+    }
+
+    // Pasta-raiz (todos os canais): lembrada neste PC. Ao mudar, limpa o cache
+    // de canais (pra re-listar a raiz nova).
+    var driveRootEl = document.getElementById("drive-root");
+    if (driveRootEl) {
+        try { driveRootEl.value = localStorage.getItem(DRIVE_ROOT_STORAGE) || ""; } catch (e) {}
+        driveRootEl.addEventListener("change", function () {
+            try { localStorage.setItem(DRIVE_ROOT_STORAGE, driveRootEl.value.trim()); } catch (e) {}
+            _driveResetChannelCache();
+        });
+    }
+
+    // Botão "Importar do projeto atual": acha a pasta pelo nome do .prproj.
+    var driveAutoBtn = document.getElementById("btn-drive-import-auto");
+    if (driveAutoBtn) driveAutoBtn.addEventListener("click", function () {
+        importFromProjectName(function (num, opts) {
+            renderProductCard(num, { driveStaged: true, stagedFiles: opts.stagedFiles, refPath: opts.refPath, videoLinks: opts.videoLinks });
+        }, false);
+    });
+
+    // Toggle "importar ao abrir o projeto" (global, off por padrão).
+    var driveAutoChk = document.getElementById("drive-auto-open");
+    if (driveAutoChk) {
+        try { driveAutoChk.checked = (localStorage.getItem(DRIVE_AUTO_STORAGE) === "1"); } catch (e) {}
+        driveAutoChk.addEventListener("change", function () {
+            try { localStorage.setItem(DRIVE_AUTO_STORAGE, driveAutoChk.checked ? "1" : "0"); } catch (e) {}
+        });
     }
 
     // Gemini: chave (global, neste PC) + lista de produtos (lembrada por projeto).
@@ -593,6 +624,21 @@ function initRecursos() {
             renderProductCard(num, { driveStaged: true, stagedFiles: opts.stagedFiles, refPath: opts.refPath, videoLinks: opts.videoLinks });
         });
     });
+    // ── Áudio: corte de silêncio ──────────────────────────────────────────
+    var cutBtn = document.getElementById("btn-cut-silence");
+    if (cutBtn) cutBtn.addEventListener("click", function () {
+        cutBtn.disabled = true;
+        cutSilenceAndInsert(function (status) {
+            cutBtn.disabled = false;
+            if (status === "notfound") recLog("Áudio: nenhum arquivo de áudio encontrado na pasta selecionada.", "warn");
+        });
+    });
+    var audioAutoEl = document.getElementById("audio-auto");
+    if (audioAutoEl) {
+        try { audioAutoEl.checked = (localStorage.getItem(AUDIO_AUTO_STORAGE) === "1"); } catch (e) {}
+        audioAutoEl.addEventListener("change", function () { try { localStorage.setItem(AUDIO_AUTO_STORAGE, audioAutoEl.checked ? "1" : "0"); } catch (e) {} });
+    }
+
     var tplBtn = document.getElementById("btn-create-templates");
     if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
     refreshTemplateSeqSection();
@@ -1262,6 +1308,11 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
     try { fs.mkdirSync(outDir, { recursive: true }); }
     catch (e) { fail("Erro criando pasta '" + outDir + "': " + e.message); return; }
 
+    // Arquivo de histórico (resume): yt-dlp registra cada vídeo já baixado aqui e,
+    // numa re-execução (ex. Premiere fechou no meio), PULA os que já terminaram.
+    // Fica na raiz dos downloads do projeto (vale pra todos os produtos).
+    var ytArchive = pmod.join(prjDir, "AutoEditor_Downloads", "_yt_archive.txt");
+
     // Limpa arquivos órfãos de execuções anteriores (manifests HLS, .part etc).
     // Se ficar um .m3u8 antigo de um download falho, o yt-dlp tenta usá-lo como
     // input do postprocessor e quebra com "Invalid data found when processing
@@ -1346,6 +1397,9 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
             // IPv6 (googlevideo/Amazon) e ficava SEM progresso até o watchdog
             // abortar (2 min). Mesma causa do ETIMEDOUT do Node, agora no yt-dlp.
             "-4",
+            // Resume: --continue retoma o .part de onde parou; --download-archive
+            // pula vídeos JÁ baixados (Premiere fechou no meio → retoma só o que falta).
+            "--continue", "--download-archive", ytArchive,
             "--restrict-filenames", "--no-warnings",
             // A Amazon serve captcha/anti-bot intermitente; o extrator re-tenta a
             // página, mas o padrão (3) às vezes estoura → "Unable to extract data".
@@ -1358,9 +1412,11 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
         ]);
 
         var ytFinalPath = "", ytPaths = [], lastPctReported = -1, lastActivityMs = Date.now();
+        var _archiveSkipped = false; // vídeo já no _yt_archive.txt (resume) → não é falha
         function processLine(line) {
             var s = line.replace(/\r$/, "").trim();
             if (!s) return;
+            if (/has already been recorded in the archive|has already been downloaded/i.test(s)) { _archiveSkipped = true; }
             var pct = s.match(/\[download\]\s+([\d.]+)%/);
             if (pct) {
                 var n = Math.floor(parseFloat(pct[1]) / 5) * 5;
@@ -1471,7 +1527,15 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
                     }
                 } catch (eF) {}
             }
-            if (!ytPaths.length) { fail("Download terminou (exit 0) mas nenhum arquivo novo foi criado — provavelmente o extractor falhou silenciosamente."); return; }
+            if (!ytPaths.length) {
+                if (_archiveSkipped) {
+                    // Já estava no histórico (baixado antes) → resume correto, não falha.
+                    // O arquivo já está na pasta PROD e é re-stageado na importação.
+                    recLog("  ↳ já no histórico — reaproveitando o arquivo já baixado.", "info");
+                    onDone(null, []); return;
+                }
+                fail("Download terminou (exit 0) mas nenhum arquivo novo foi criado — provavelmente o extractor falhou silenciosamente."); return;
+            }
             recLog("✓ Baixado(s): " + ytPaths.length + " arquivo(s).", "ok");
             ytPaths.forEach(function (p) { recLog("   • " + p, "ok"); });
             // No modo multi entrega o array inteiro; senão, o caminho único (compat).
@@ -1498,7 +1562,351 @@ function recBaseName(path) {
 // pra cada subpasta, baixa as imagens/o .txt, popula o staging de um card de
 // produto PROD_N (pré-marcando o .png como referência) e enfileira os vídeos.
 // Acesso: API key do Google (Drive API) + pasta compartilhada "qualquer um c/ link".
-var DRIVE_KEY_STORAGE = "autoeditor_drive_apikey";
+var DRIVE_KEY_STORAGE  = "autoeditor_drive_apikey";
+var DRIVE_ROOT_STORAGE = "autoeditor_drive_root";   // pasta-raiz (todos os canais)
+var DRIVE_AUTO_STORAGE = "autoeditor_drive_auto";   // "1" = importa ao abrir o projeto
+
+// Normaliza um nome (projeto ou pasta) numa chave SIGLA+NÚMERO comparável:
+// "AT 05", "AT - 5", "AT-05", "ATC 03" → "AT5"/"AT5"/"AT5"/"ATC3".
+// Pega as letras iniciais (sigla) + o primeiro número (sem zero à esquerda).
+// Retorna null se não houver o padrão (ex. nome de canal "Auto Tech").
+function _normProjectKey(name) {
+    var m = String(name || "").match(/([A-Za-z]+)\s*[-_ ]*\s*0*(\d+)/);
+    if (!m) return null;
+    return m[1].toUpperCase() + parseInt(m[2], 10);
+}
+
+// Cache (por sessão) dos canais = subpastas da raiz. Evita re-listar a raiz a
+// cada importação. _driveResetChannelCache() limpa (ex. botão "atualizar").
+var _driveChannelCache = null;
+function _driveResetChannelCache() { _driveChannelCache = null; }
+
+// Acha a pasta do PROJETO dentro da raiz, casando a chave normalizada (ex "AT5")
+// contra as subpastas de cada canal. Para no 1º match (sigla é única por canal).
+// cb(err, { id, name, channel } | null).
+function _driveFindProjectFolder(apiKey, rootId, key, cb) {
+    function searchChannels(channels) {
+        var ci = 0;
+        (function nextChannel() {
+            if (ci >= channels.length) { cb(null, null); return; } // varreu tudo, sem match
+            var ch = channels[ci++];
+            _driveList(apiKey, ch.id, function (err, files) {
+                if (err) { recLog("Drive: erro listando canal '" + ch.name + "': " + err.message, "warn"); nextChannel(); return; }
+                for (var i = 0; i < files.length; i++) {
+                    var f = files[i];
+                    if (f.mimeType !== "application/vnd.google-apps.folder") continue;
+                    if (_normProjectKey(f.name) === key) { cb(null, { id: f.id, name: f.name, channel: ch.name }); return; }
+                }
+                nextChannel();
+            });
+        })();
+    }
+    if (_driveChannelCache) { searchChannels(_driveChannelCache); return; }
+    _driveList(apiKey, rootId, function (err, files) {
+        if (err) { cb(err); return; }
+        var channels = [];
+        files.forEach(function (f) {
+            if (f.mimeType === "application/vnd.google-apps.folder") channels.push({ id: f.id, name: f.name });
+        });
+        _driveChannelCache = channels;
+        searchChannels(channels);
+    });
+}
+
+// Importa a pasta do projeto ATUAL: resolve sigla+número pelo nome do .prproj,
+// acha a pasta na raiz e chama a importação normal. cb(num, opts) cria os cards.
+// silent=true (auto ao abrir) → não loga avisos de "configure X" (fica quieto).
+// onResult(status): "ok" | "notready" (nome do projeto ainda vazio — vale re-tentar)
+// | "noconfig" | "notfound" | "error". O auto usa isso pra re-tentar no cold-start.
+function importFromProjectName(renderCb, silent, onResult) {
+    onResult = onResult || function () {};
+    var apiKey   = (localStorage.getItem(DRIVE_KEY_STORAGE) || "").trim();
+    var rootInput = ((document.getElementById("drive-root") || {}).value || localStorage.getItem(DRIVE_ROOT_STORAGE) || "").trim();
+    var rootId   = _driveExtractFolderId(rootInput);
+    if (!apiKey)  { recLog("Drive: sem API key configurada — configure na seção do Drive.", "warn"); onResult("noconfig"); return; }
+    if (!rootId)  { recLog("Drive: sem pasta RAIZ configurada.", "warn"); onResult("noconfig"); return; }
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        var prj = "";
+        try { var rp = JSON.parse(rawPrj); prj = rp.prj || ""; } catch (e) {}
+        // Cold-start: app.project.path às vezes vem vazio na 1ª chamada logo após
+        // abrir o painel. Não é erro — sinaliza "notready" pro auto re-tentar.
+        if (!prj) { if (!silent) recLog("Drive: salve o projeto primeiro (preciso do nome do .prproj).", "warn"); onResult("notready"); return; }
+        var key = _normProjectKey(prj);
+        if (!key) { recLog("Drive: nome '" + prj + "' sem padrão SIGLA+NÚMERO — use o ID manual.", "warn"); onResult("error"); return; }
+        recLog("Drive: procurando a pasta do projeto '" + prj + "' (chave " + key + ") na raiz…");
+        _driveFindProjectFolder(apiKey, rootId, key, function (err, found) {
+            if (err) { recLog("✗ Drive: " + err.message, "err"); onResult("error"); return; }
+            if (!found) { recLog("✗ Drive: não achei pasta '" + key + "' em nenhum canal da raiz. Confira o nome do .prproj ou use o ID manual.", "warn"); onResult("notfound"); return; }
+            recLog("✓ Drive: encontrado " + found.channel + " / " + found.name + " — importando…", "ok");
+            importProductsFromDrive(apiKey, found.id, renderCb);
+            onResult("ok");
+        });
+    });
+}
+
+// Auto-import do Drive com retry no cold-start (nome do projeto ainda vazio).
+function _attemptDriveAutoImport(path, tries) {
+    if (path !== _lastSeenProjectPath) return; // trocou de projeto → aborta
+    if (tries === 0) recLog("Auto-import: projeto aberto — buscando a pasta no Drive…");
+    importFromProjectName(function (num, opts) {
+        renderProductCard(num, { driveStaged: true, stagedFiles: opts.stagedFiles, refPath: opts.refPath, videoLinks: opts.videoLinks });
+    }, true, function (result) {
+        if (result === "notready") {
+            if (tries < 12) { setTimeout(function () { _attemptDriveAutoImport(path, tries + 1); }, 3000); }
+            else recLog("Auto-import: desisti — o nome do projeto não ficou pronto. Use 'Importar do projeto atual'.", "warn");
+        }
+    });
+}
+
+// ── Estado/estatística da importação do Drive (pro log final "tudo pronto") ──
+var _driveImportRunning = false;  // loop de produtos em andamento
+var _driveAwaitingDrain = false;  // loop acabou; esperando os downloads drenarem
+var _driveStats = { products: 0, images: 0, videos: 0, failed: 0 };
+function _driveStatsReset() { _driveStats = { products: 0, images: 0, videos: 0, failed: 0 }; }
+
+// Anuncia "tudo pronto" UMA vez, quando o loop de produtos terminou E não há mais
+// download rodando nem na fila. Chamado ao fim do loop e a cada download que acaba.
+function _maybeAnnounceAllDone() {
+    if (_driveImportRunning || !_driveAwaitingDrain) return;
+    if (_dlActive > 0 || _dlQueue.length > 0) return;
+    _driveAwaitingDrain = false;
+    var s = _driveStats;
+    recLog("✅ Tudo pronto: " + s.products + " pasta(s), " + s.videos + " vídeo(s) baixado(s), " +
+           s.images + " imagem(ns)" + (s.failed ? ", " + s.failed + " download(s) falharam" : "") +
+           ". Confira o png e clique em Criar em cada produto.", s.failed ? "warn" : "ok");
+}
+
+// ─── CORTE DE SILÊNCIO (port do SilenCut AI) ─────────────────────────────────
+// Acha o áudio na pasta (projeto ou global Music\AutoEditor), detecta silêncios
+// com o MESMO algoritmo do SilenCut (janela 20ms + RMS, -45dB/0.30s/0.05s margem),
+// gera um WAV cortado via ffmpeg e insere na timeline. Config embutida (padrão).
+var SILENCE_THRESHOLD_DB = -45;
+var SILENCE_MIN_DURATION = 0.30;
+var SILENCE_PADDING      = 0.05;
+var SILENCE_WINDOW       = 0.02;   // 20ms
+var AUDIO_EXTS = { mp3:1, wav:1, m4a:1, aac:1, flac:1, ogg:1, opus:1, wma:1, aiff:1, aif:1 };
+var AUDIO_AUTO_STORAGE = "autoeditor_audio_auto";  // "1" = corta ao abrir o projeto
+
+// Pasta global Music\AutoEditor do usuário atual (cria se faltar). Adapta ao PC.
+function _globalAudioDir() {
+    var os = tryNodeRequire('os'), pmod = tryNodeRequire('path'), fs = tryNodeRequire('fs');
+    if (!pmod) return "";
+    var home = "";
+    try { home = os && os.homedir ? os.homedir() : ""; } catch (e) {}
+    if (!home) { try { home = process.env.USERPROFILE || process.env.HOME || ""; } catch (e2) {} }
+    if (!home) return "";
+    var dir = pmod.join(home, "Music", "AutoEditor");
+    try { if (fs && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch (e3) {}
+    return dir;
+}
+
+// Acha o áudio na pasta. 1º critério: ter um áudio. Desempate (vários): nome
+// igual ao do projeto (normalizado), senão o mais recente. Ignora os *_cut.
+function _findAudioFile(folder, projectName) {
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    if (!fs || !pmod || !folder) return null;
+    var names; try { names = fs.readdirSync(folder); } catch (e) { return null; }
+    var cands = [];
+    names.forEach(function (n) {
+        var dot = n.lastIndexOf("."); if (dot < 0) return;
+        var ext = n.substring(dot + 1).toLowerCase();
+        if (!AUDIO_EXTS[ext]) return;
+        if (/_cut$/i.test(n.substring(0, dot))) return; // ignora saída cortada
+        var p = pmod.join(folder, n), m = 0;
+        try { m = fs.statSync(p).mtimeMs; } catch (e) {}
+        cands.push({ name: n, path: p, mtime: m, base: n.substring(0, dot) });
+    });
+    if (!cands.length) return null;
+    if (cands.length === 1) return cands[0];
+    var pkey = _normProjectKey(projectName), pl = String(projectName || "").toLowerCase();
+    for (var i = 0; i < cands.length; i++) {
+        if (cands[i].base.toLowerCase() === pl) return cands[i];          // nome exato do projeto
+        if (pkey && _normProjectKey(cands[i].base) === pkey) return cands[i]; // sigla+número
+    }
+    cands.sort(function (a, b) { return b.mtime - a.mtime; });            // senão, mais recente
+    return cands[0];
+}
+
+// Detecta silêncios EXATO como o SilenCut: ffmpeg decodifica → PCM f32le mono
+// (canal 0), e rodamos a janela de 20ms + RMS em streaming (memória baixa).
+// cb(err, { duration, silences:[{start,end}], sampleRate }).
+function _detectSilenceRMS(audioPath, cb) {
+    var cp = tryNodeRequire('child_process'), pmod = tryNodeRequire('path');
+    if (!cp || !pmod) { cb(new Error("Node indisponível.")); return; }
+    var extDir = getExtensionRootClient();
+    var ff  = pmod.join(extDir, "bin", "ffmpeg.exe");
+    var ffp = pmod.join(extDir, "bin", "ffprobe.exe");
+    var sr = 44100;
+    try {
+        var r = cp.spawnSync(ffp, ["-v","error","-select_streams","a:0","-show_entries","stream=sample_rate","-of","csv=p=0", audioPath],
+                             { windowsHide:true, encoding:"utf8", timeout:15000 });
+        if (r && r.stdout) { var v = parseInt(String(r.stdout).trim(), 10); if (v > 0) sr = v; }
+    } catch (e) {}
+    var windowSize = Math.floor(sr * SILENCE_WINDOW); if (windowSize < 1) windowSize = 1;
+    var linTh = Math.pow(10, SILENCE_THRESHOLD_DB / 20);
+
+    var ch;
+    try { ch = cp.spawn(ff, ["-i", audioPath, "-af", "pan=mono|c0=c0", "-f", "f32le", "-acodec", "pcm_f32le", "-"],
+                        { windowsHide:true, stdio:["ignore","pipe","ignore"] }); }
+    catch (e) { cb(e); return; }
+
+    var silences = [], isSilent = false, silenceStart = 0;
+    var completedWindows = 0, samplesInWindow = 0, sumSq = 0, totalSamples = 0;
+    var leftover = Buffer.alloc(0);
+    function finalizeWindow(count) {
+        var windowStart = completedWindows * windowSize;
+        var rms = Math.sqrt(sumSq / count);
+        var currentTime = windowStart / sr;
+        if (rms < linTh) {
+            if (!isSilent) { isSilent = true; silenceStart = currentTime; }
+        } else if (isSilent) {
+            isSilent = false;
+            var dur = currentTime - silenceStart;
+            if (dur >= SILENCE_MIN_DURATION) {
+                var s = Math.max(0, silenceStart + SILENCE_PADDING);
+                var e = Math.max(s, currentTime - SILENCE_PADDING);
+                if (e - s > 0.1) silences.push({ start: s, end: e });
+            }
+        }
+        completedWindows++; samplesInWindow = 0; sumSq = 0;
+    }
+    ch.stdout.on("data", function (chunk) {
+        var buf = leftover.length ? Buffer.concat([leftover, chunk]) : chunk;
+        var n = Math.floor(buf.length / 4);
+        for (var i = 0; i < n; i++) {
+            var f = buf.readFloatLE(i * 4);
+            sumSq += f * f; samplesInWindow++; totalSamples++;
+            if (samplesInWindow === windowSize) finalizeWindow(windowSize);
+        }
+        leftover = buf.slice(n * 4);
+    });
+    ch.on("error", function (e) { cb(e); });
+    ch.on("close", function () {
+        if (samplesInWindow > 0) finalizeWindow(samplesInWindow); // janela parcial final
+        if (totalSamples === 0) { cb(new Error("não consegui ler o áudio (ffmpeg não retornou PCM).")); return; }
+        var duration = totalSamples / sr;
+        if (isSilent) {
+            var dur = duration - silenceStart;
+            if (dur >= SILENCE_MIN_DURATION) silences.push({ start: silenceStart + SILENCE_PADDING, end: duration });
+        }
+        cb(null, { duration: duration, silences: silences, sampleRate: sr });
+    });
+}
+
+// Complemento dos silêncios = trechos de fala a manter.
+function _buildKeepSegments(duration, silences) {
+    var keeps = [], lastEnd = 0;
+    silences.slice().sort(function (a, b) { return a.start - b.start; }).forEach(function (rg) {
+        if (rg.start > lastEnd) keeps.push({ start: lastEnd, end: rg.start });
+        lastEnd = rg.end;
+    });
+    if (lastEnd < duration) keeps.push({ start: lastEnd, end: duration });
+    return keeps;
+}
+
+// Gera o WAV cortado: ffmpeg atrim+concat dos keep-segments (filtergraph num
+// arquivo, via -/filter_complex — sem limite de linha de comando). cb(err, outPath).
+function _generateCutAudio(audioPath, keeps, outPath, cb) {
+    var cp = tryNodeRequire('child_process'), fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    var ff = pmod.join(extDir, "bin", "ffmpeg.exe");
+    var lines = [], labels = [];
+    keeps.forEach(function (k, i) {
+        lines.push("[0:a]atrim=start=" + k.start.toFixed(3) + ":end=" + k.end.toFixed(3) + ",asetpts=PTS-STARTPTS[k" + i + "];");
+        labels.push("[k" + i + "]");
+    });
+    lines.push(labels.join("") + "concat=n=" + keeps.length + ":v=0:a=1[out]");
+    var fgPath = pmod.join(pmod.dirname(outPath), "_ae_silencefg.txt");
+    try { fs.writeFileSync(fgPath, lines.join("\n"), "utf8"); } catch (e) { cb(e); return; }
+    var ch;
+    try { ch = cp.spawn(ff, ["-y", "-i", audioPath, "-/filter_complex", fgPath, "-map", "[out]", "-c:a", "pcm_s16le", outPath],
+                        { windowsHide:true, stdio:["ignore","ignore","pipe"] }); }
+    catch (e) { cb(e); return; }
+    var errOut = "";
+    ch.stderr.on("data", function (d) { if (errOut.length < 4000) errOut += d.toString(); });
+    ch.on("error", function (e) { cb(e); });
+    ch.on("close", function (code) {
+        try { fs.unlinkSync(fgPath); } catch (e) {}
+        if (code === 0) cb(null, outPath);
+        else cb(new Error("ffmpeg saiu " + code + ": " + errOut.slice(-220)));
+    });
+}
+
+// Orquestra: acha áudio → detecta → corta → insere na timeline. cb(status):
+// "ok" | "notfound" | "error". silent=true (auto) reduz logs de "configure".
+function cutSilenceAndInsert(cb) {
+    cb = cb || function () {};
+    var pmod = tryNodeRequire('path');
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        var prjDir = "", prj = "";
+        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; prj = rp.prj || ""; } catch (e) {}
+        if (!prjDir) { recLog("Áudio: salve o projeto primeiro (preciso da pasta do .prproj).", "warn"); cb("error"); return; }
+        // Acha o áudio: 1º na pasta do PROJETO; se não houver, cai na GLOBAL
+        // Music\AutoEditor (fallback automático — sem precisar escolher).
+        var found = _findAudioFile(prjDir, prj);
+        if (!found) {
+            var gdir = _globalAudioDir();
+            if (gdir) found = _findAudioFile(gdir, prj);
+        }
+        if (!found) { cb("notfound"); return; }
+        var folder = pmod.dirname(found.path); // pasta onde o áudio está (o _cut vai aqui)
+
+        recLog("Áudio: '" + found.name + "' — detectando silêncios (" + SILENCE_THRESHOLD_DB + "dB / " + SILENCE_MIN_DURATION + "s)…");
+        _detectSilenceRMS(found.path, function (err, res) {
+            if (err) { recLog("✗ Áudio: " + err.message, "err"); cb("error"); return; }
+            var keeps = _buildKeepSegments(res.duration, res.silences);
+            var keptDur = keeps.reduce(function (a, k) { return a + (k.end - k.start); }, 0);
+            var removed = res.duration - keptDur;
+            var outPath = pmod.join(folder, found.base + "_cut.wav");
+
+            function insert(finalPath, label) {
+                var esc = String(finalPath).replace(/\\/g, "\\\\");
+                cs.evalScript('insertAudioOnTimeline("' + esc + '", 0)', function (raw) {
+                    var ok = false, e2 = "";
+                    try { var d = JSON.parse(raw); ok = !!d.success; e2 = d.error || ""; } catch (eP) {}
+                    if (ok) { recLog("✅ Áudio pronto: " + label + " inserido na timeline (A1).", "ok"); cb("ok"); }
+                    else { recLog("✗ Áudio: falha ao inserir na timeline: " + e2, "err"); cb("error"); }
+                });
+            }
+
+            if (!res.silences.length) {
+                recLog("Áudio: nenhum silêncio detectado — inserindo o original.", "info");
+                insert(found.path, found.name);
+                return;
+            }
+            recLog("Áudio: " + res.silences.length + " silêncio(s), removendo " + removed.toFixed(1) + "s (de " + res.duration.toFixed(1) + "s) → cortando…");
+            _generateCutAudio(found.path, keeps, outPath, function (e3, out) {
+                if (e3) { recLog("✗ Áudio: corte falhou: " + e3.message, "err"); cb("error"); return; }
+                insert(out, found.base + "_cut.wav");
+            });
+        });
+    });
+}
+
+// Auto-corte ao abrir, com retry de 15s até o áudio aparecer (você às vezes abre
+// o Premiere pro Drive importar enquanto ainda gera o áudio no CapCut).
+var _audioCutState = {}; // path -> "running" | "done"
+function _maybeAutoCutSilence(path) {
+    var on = false; try { on = (localStorage.getItem(AUDIO_AUTO_STORAGE) === "1"); } catch (e) {}
+    if (!on || !path) return;
+    if (_audioCutState[path]) return; // já rodando/feito neste projeto
+    _attemptAudioCut(path, 0);
+}
+function _attemptAudioCut(path, tries) {
+    if (path !== _lastSeenProjectPath) return;          // trocou de projeto → aborta o retry
+    if (_audioCutState[path] === "done") return;
+    _audioCutState[path] = "running";
+    cutSilenceAndInsert(function (status) {
+        if (status === "notfound") {
+            _audioCutState[path] = null;                 // libera pra próxima tentativa
+            if (path !== _lastSeenProjectPath) return;
+            if (tries === 0) recLog("Áudio: nenhum arquivo na pasta ainda — tentando de novo a cada 15s…", "info");
+            setTimeout(function () { _attemptAudioCut(path, tries + 1); }, 15000);
+        } else {
+            _audioCutState[path] = "done";               // ok ou erro real: não fica em loop
+        }
+    });
+}
 
 // Geração do mapeamento via Gemini (fallback quando não há *_autoeditor.json).
 // 2.5-flash é o que roda no free tier (2.5-pro exige billing). Chave salva
@@ -1515,6 +1923,22 @@ function getGeminiProducts() { var el = document.getElementById("gemini-products
 // que segurou o PROD_4). Aqui as tarefas rodam UMA POR VEZ: cada uma recebe um
 // done() que DEVE ser chamado ao terminar; a próxima só começa depois.
 var _dlQueue = [], _dlActive = 0, _DL_MAX_CONCURRENT = 3;
+
+// Downloads que falharam de verdade (não os archive-skip) — pro botão de re-tentar.
+// Cada item: { label, run(done2) } onde run re-baixa e estagia no card certo.
+var _failedDownloads = [];
+function retryFailedDownloads() {
+    if (!_failedDownloads.length) { recLog("Nenhum download falhado pra re-tentar.", "info"); return; }
+    var list = _failedDownloads.splice(0); // pega todos e zera a lista
+    recLog("↻ Re-tentando " + list.length + " download(s) que falharam…");
+    list.forEach(function (item) {
+        enqueueDownloadTask(function (done) {
+            recLog("↻ " + item.label + "…");
+            try { item.run(function (ok) { if (!ok) _failedDownloads.push(item); done(); }); }
+            catch (e) { _failedDownloads.push(item); done(); }
+        });
+    });
+}
 
 // Lock global do modal de seleção (Amazon): só UM seletor de vídeos aparece por
 // vez, mesmo com vários downloads rodando em paralelo. Os outros esperam a vez
@@ -1573,7 +1997,7 @@ function _dlPump() {
         _dlActive++;
         (function () {
             var doneCalled = false;
-            function done() { if (doneCalled) return; doneCalled = true; _dlActive--; _dlPump(); }
+            function done() { if (doneCalled) return; doneCalled = true; _dlActive--; _dlPump(); _maybeAnnounceAllDone(); }
             try { task(done); } catch (e) { done(); }
         })();
     }
@@ -1664,8 +2088,9 @@ function importProductsFromDrive(apiKey, folderInput, renderCb) {
         if (!prjDir) { recLog("Salve o projeto antes (as imagens/vídeos vão pra pasta ao lado do .prproj).", "err"); return; }
 
         recLog("Drive: listando subpastas…");
+        _driveStatsReset(); _failedDownloads = []; _driveImportRunning = true; _driveAwaitingDrain = true;
         _driveList(apiKey, folderId, function (err, children) {
-            if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); return; }
+            if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); _driveImportRunning = false; _driveAwaitingDrain = false; return; }
             // Preenche a lista do Gemini se houver nomes_dos_produtos.txt solto na pasta-mãe.
             _driveFillProductNames(apiKey, children);
             var subs = [];
@@ -1675,12 +2100,17 @@ function importProductsFromDrive(apiKey, folderInput, renderCb) {
                 if (mm) subs.push({ num: parseInt(mm[1], 10), name: mm[2].replace(/^\s+|\s+$/g, ""), id: c.id });
             });
             subs.sort(function (a, b) { return a.num - b.num; });
-            if (!subs.length) { recLog("Drive: nenhuma subpasta no padrão 'N - Nome' encontrada.", "warn"); return; }
+            if (!subs.length) { recLog("Drive: nenhuma subpasta no padrão 'N - Nome' encontrada.", "warn"); _driveImportRunning = false; _driveAwaitingDrain = false; return; }
             recLog("Drive: " + subs.length + " produto(s): " + subs.map(function (s) { return s.num + " " + s.name; }).join(" | "));
 
             var i = 0;
             (function nextSub() {
-                if (i >= subs.length) { recLog("✓ Drive: importação concluída — confira o png e clique em Criar em cada produto.", "ok"); return; }
+                if (i >= subs.length) {
+                    recLog("✓ Drive: importação concluída — confira o png e clique em Criar em cada produto.", "ok");
+                    _driveImportRunning = false; // loop acabou; downloads podem continuar
+                    _maybeAnnounceAllDone();     // anuncia já se nada ficou na fila
+                    return;
+                }
                 _driveImportOneProduct(apiKey, prjDir, subs[i++], renderCb, nextSub);
             })();
         });
@@ -1702,17 +2132,27 @@ function _driveImportOneProduct(apiKey, prjDir, sub, renderCb, done) {
         });
         var imgPaths = [], pngPath = null, links = [];
 
+        // Registra o arquivo já no disco (sem re-baixar): usado tanto pelo skip
+        // de resume quanto pelo download normal.
+        function accountFor(f, dest, kind) {
+            if (kind === "imagem") { imgPaths.push(dest); if (!pngPath && /\.png$/i.test(f.name)) pngPath = dest; }
+            else { try { links = links.concat(_extractLinksFromText(fs.readFileSync(dest, "utf8"))); } catch (e3) {} }
+        }
         function downloadAll(list, kind, after) {
             var k = 0;
             (function nx() {
                 if (k >= list.length) { after(); return; }
                 var f = list[k++];
                 var dest = pmod.join(outDir, f.name);
+                // Resume: se já está no disco (tamanho > 0), pula o download. Também
+                // evita o EBUSY quando o arquivo está aberto/travado (re-importação).
+                var already = false;
+                try { already = (fs.existsSync(dest) && fs.statSync(dest).size > 0); } catch (eEx) {}
+                if (already) { recLog("  já existe (pulado): " + f.name); accountFor(f, dest, kind); nx(); return; }
                 recLog("  baixando " + kind + ": " + f.name);
                 _driveDownload(apiKey, f.id, dest, function (e2) {
                     if (e2) { recLog("  ✗ " + f.name + ": " + e2.message, "err"); }
-                    else if (kind === "imagem") { imgPaths.push(dest); if (!pngPath && /\.png$/i.test(f.name)) pngPath = dest; }
-                    else { try { links = links.concat(_extractLinksFromText(fs.readFileSync(dest, "utf8"))); } catch (e3) {} }
+                    else { accountFor(f, dest, kind); }
                     nx();
                 });
             })();
@@ -1721,8 +2161,24 @@ function _driveImportOneProduct(apiKey, prjDir, sub, renderCb, done) {
         downloadAll(imgs, "imagem", function () {
             downloadAll(txts, "txt", function () {
                 if (!pngPath && imgPaths.length) pngPath = imgPaths[0]; // sem .png → 1ª imagem
-                recLog("✓ Drive PROD_" + sub.num + ": " + imgPaths.length + " imagem(ns), " + links.length + " link(s) de vídeo.", "ok");
-                try { renderCb(sub.num, { stagedFiles: imgPaths, refPath: pngPath, videoLinks: links }); } catch (eR) { recLog("✗ card PROD_" + sub.num + ": " + eR.message, "err"); }
+                // Resume: re-stageia vídeos JÁ baixados (de importação anterior) que
+                // estão na pasta PROD — o download os pula via --download-archive, então
+                // sem isto eles não entrariam no card recriado. Ignora .part incompletos.
+                var existingVids = [];
+                try {
+                    fs.readdirSync(outDir).forEach(function (n) {
+                        if (/\.(mp4|mkv|webm|m4a|mov)$/i.test(n)) existingVids.push(pmod.join(outDir, n));
+                    });
+                } catch (eV) {}
+                _driveStats.products++; _driveStats.images += imgPaths.length; _driveStats.videos += existingVids.length;
+                // Já tem vídeo(s) suficiente(s) na pasta? Pula o download (resume completo)
+                // — sem isto o yt-dlp re-extrai e "archive-skip" gera falso ✗ no log.
+                // Se faltar (menos vídeos que links), ainda baixa pra pegar o que falta.
+                var vidsComplete = (links.length > 0 && existingVids.length >= links.length);
+                recLog("✓ Drive PROD_" + sub.num + ": " + imgPaths.length + " imagem(ns), " +
+                       (existingVids.length ? existingVids.length + " vídeo(s) já baixado(s)" + (vidsComplete ? " (completo, sem re-baixar)" : "") + ", " : "") +
+                       links.length + " link(s) de vídeo.", "ok");
+                try { renderCb(sub.num, { stagedFiles: imgPaths.concat(existingVids), refPath: pngPath, videoLinks: vidsComplete ? [] : links }); } catch (eR) { recLog("✗ card PROD_" + sub.num + ": " + eR.message, "err"); }
                 done();
             });
         });
@@ -2026,6 +2482,8 @@ function renderProductCard(n, opts) {
                 setBusy(false);
                 recLog("✓ Fila concluída: " + ok + " baixado(s)" + (failed ? ", " + failed + " falhou" : "") + ".",
                        failed ? "warn" : "ok");
+                // Acumula no resumo do Drive (só durante uma importação do Drive).
+                if (_driveAwaitingDrain) { _driveStats.videos += ok; _driveStats.failed += failed; }
                 if (typeof onAllDone === "function") onAllDone();
                 return;
             }
@@ -2052,6 +2510,20 @@ function renderProductCard(n, opts) {
                         failed++; recLog("✗ link " + (i + 1) + ": " + err.message, "err");
                         var hint = _productPageHint(url);
                         if (hint) recLog("  ↳ " + hint, "warn");
+                        // Guarda pra re-tentar depois (botão "↻ Re-tentar falhados").
+                        // A closure mantém o contexto do card (n + addPaths) pra
+                        // estagiar o arquivo no produto certo se a re-tentativa der certo.
+                        (function (fUrl, fIdx) {
+                            _failedDownloads.push({
+                                label: "PRODUTO " + n + " — link " + fIdx,
+                                run: function (done2) {
+                                    downloadYTToFolder(n, fUrl, function () {}, function (e2, fp) {
+                                        if (!e2 && fp) { var ps2 = [].concat(fp); if (ps2.length) addPaths(ps2); }
+                                        done2(!e2);
+                                    }, chooseVideosModal);
+                                }
+                            });
+                        })(url, i + 1);
                     } else {
                         var ps = [].concat(filePath); ok += ps.length; addPaths(ps);
                     }
@@ -2992,6 +3464,54 @@ function initProjectPersistence() {
             } catch (eGP) {}
         } catch(e) { /* usa chave default */ }
     });
+}
+
+// Observa a troca/abertura de projeto (o painel não recarrega sozinho ao abrir
+// outro .prproj). A cada ~5s compara o caminho do projeto; ao mudar:
+//   1) atualiza _projectKey + estado por-projeto (conserta staleness ao trocar
+//      de projeto sem reabrir o painel);
+//   2) se o auto-import estiver LIGADO + raiz configurada + ainda não importamos
+//      este projeto nesta sessão + NÃO há cards na tela → dispara a importação.
+// É no-op total quando o toggle está off (caso do amigo que não usa Drive).
+var _lastSeenProjectPath = null;
+var _autoImportedPaths   = {};
+function _watchProjectChanges() {
+    setInterval(function () {
+        cs.evalScript("getProjectPath()", function (raw) {
+            var path = "";
+            try { var d = JSON.parse(raw); path = d.path || ""; } catch (e) { return; }
+            if (path === _lastSeenProjectPath) return; // sem mudança
+            _lastSeenProjectPath = path;
+            if (!path) return; // nenhum projeto salvo aberto
+
+            // (1) Atualiza a chave do projeto + restaura estado por-projeto.
+            _projectKey = "autoeditor_" + path;
+            try { restoreProjectPaths(); } catch (eR) {}
+            try {
+                var gp = document.getElementById("gemini-products");
+                if (gp) gp.value = localStorage.getItem(_geminiProductsKey()) || "";
+            } catch (eGP) {}
+
+            // (2) Auto-import (opt-in). Guardas: toggle on + raiz + 1x por sessão +
+            // sem cards na tela (evita duplicar produtos já restaurados).
+            var autoOn = false, hasRoot = false;
+            try { autoOn = (localStorage.getItem(DRIVE_AUTO_STORAGE) === "1"); } catch (e) {}
+            try { hasRoot = !!_driveExtractFolderId(localStorage.getItem(DRIVE_ROOT_STORAGE) || ""); } catch (e) {}
+            var hasCards = false;
+            try { var pc = document.getElementById("products-container"); hasCards = !!(pc && pc.children.length); } catch (e) {}
+            if (autoOn && hasRoot && !_autoImportedPaths[path] && !hasCards) {
+                _autoImportedPaths[path] = true;
+                // Vai pra aba Recursos pra mostrar o Status trabalhando (reusa o
+                // clique da aba pra manter qualquer lógica associada).
+                try { var rt = document.querySelector('.tab[data-tab="recursos"]'); if (rt) rt.click(); } catch (eT) {}
+                _attemptDriveAutoImport(path, 0); // com retry no cold-start
+            }
+
+            // (3) Auto-corte de silêncio (independente do Drive): se ligado, corta
+            // o áudio da pasta e insere na timeline (com retry de 15s até achar).
+            try { _maybeAutoCutSilence(path); } catch (eAC) {}
+        });
+    }, 5000);
 }
 
 function saveProjectData() {
