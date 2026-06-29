@@ -7,6 +7,17 @@ var srtEntries  = [];    // entradas SRT — fallback
 var _atomCache    = null; // stream de átomos normalizados da transcrição (findPhraseTime)
 var _atomCacheSrc = null; // referência de transcriptWords usada pra montar o cache
 
+// IPv4 primeiro: em redes sem rota IPv6 funcional, o Node resolvia googleapis.com/
+// github.com pra IPv6 e dava ETIMEDOUT (Drive, Gemini, downloads, auto-update).
+// setDefaultResultOrder cobre TODAS as conexões (Node 16.4+); as chamadas https
+// também passam family:4 como reforço pra versões mais antigas.
+(function () {
+    try {
+        var dns = tryNodeRequire('dns');
+        if (dns && typeof dns.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
+    } catch (e) {}
+})();
+
 // Formata o NÚMERO do preço conforme o idioma do projeto (loadedJSON.language):
 //   - inglês ("en", "en-US"...) → decimal com PONTO:  "240" → "240.00"
 //   - português/outros          → decimal com VÍRGULA: "240" → "240,00"
@@ -434,6 +445,59 @@ function getImageDimensions(filePath) {
     } catch(e) { return null; }
 }
 
+// Lê dimensões (largura, altura de EXIBIÇÃO) de um vídeo via ffprobe embutido.
+// Retorna { w, h } ou null. Resultado é cacheado por caminho (inclusive falhas,
+// pra não re-probar o mesmo arquivo dezenas de vezes no global_fill).
+//
+// Necessário pro fundo borrado de vídeos verticais/quadrados: o host só aplica o
+// blur quando conhece as dimensões da fonte. Lendo aqui (e passando src_w/src_h),
+// não dependemos do XMP/footage do Premiere — que falha em muitos .mp4 baixados.
+var _videoDimCache = {};
+function getVideoDimensions(filePath) {
+    if (!filePath) return null;
+    var key = String(filePath).toLowerCase();
+    if (_videoDimCache.hasOwnProperty(key)) return _videoDimCache[key];
+    _videoDimCache[key] = null; // memoiza falha por padrão (evita re-probar)
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path'), cp = tryNodeRequire('child_process');
+    if (!fs || !pmod || !cp) return null;
+    try { if (!fs.existsSync(filePath)) return null; } catch (e) { return null; }
+    var extDir = getExtensionRootClient();
+    var ffprobe = extDir ? pmod.join(extDir, "bin", "ffprobe.exe") : "ffprobe";
+    try { if (extDir && !fs.existsSync(ffprobe)) ffprobe = "ffprobe"; } catch (e) {} // fallback PATH
+    try {
+        var r = cp.spawnSync(ffprobe, [
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,side_data_list:stream_tags=rotate",
+            "-of", "json", filePath
+        ], { windowsHide: true, timeout: 15000, encoding: "utf8" });
+        if (!r || r.status !== 0 || !r.stdout) return null;
+        var info = JSON.parse(r.stdout);
+        var st = info && info.streams && info.streams[0];
+        if (!st || !st.width || !st.height) return null;
+        var w = parseInt(st.width, 10), h = parseInt(st.height, 10);
+        if (!(w > 0) || !(h > 0)) return null;
+        // Rotação (tag 'rotate' antiga OU displaymatrix em side_data): ±90/270
+        // troca W/H pra refletir como o Premiere EXIBE (vertical vs landscape).
+        var rot = 0;
+        try { if (st.tags && st.tags.rotate) rot = parseInt(st.tags.rotate, 10) || 0; } catch (eT) {}
+        try {
+            if (st.side_data_list) {
+                for (var s = 0; s < st.side_data_list.length; s++) {
+                    var sd = st.side_data_list[s];
+                    if (sd && sd.rotation !== undefined && sd.rotation !== null) {
+                        rot = parseInt(sd.rotation, 10) || rot; break;
+                    }
+                }
+            }
+        } catch (eS) {}
+        if (Math.abs(rot) % 180 === 90) { var tmp = w; w = h; h = tmp; }
+        var dim = { w: w, h: h };
+        _videoDimCache[key] = dim;
+        return dim;
+    } catch (e) { return null; }
+}
+
 // ─── MONTAR ───────────────────────────────────────────────────────────────────
 
 function initMontar() {
@@ -514,7 +578,10 @@ function initRecursos() {
     }
     var gemProdEl = document.getElementById("gemini-products");
     if (gemProdEl) {
-        try { gemProdEl.value = localStorage.getItem(_geminiProductsKey()) || ""; } catch (e) {}
+        // NÃO restaura o valor aqui: o init roda ANTES de _projectKey ser definido
+        // (que é assíncrono), então restaurar agora pegaria a chave "default" e a
+        // lista vazaria entre projetos. A restauração por projeto é feita em
+        // initProjectPersistence(), já com a chave certa. Aqui só salva ao digitar.
         gemProdEl.addEventListener("input", function () { try { localStorage.setItem(_geminiProductsKey(), gemProdEl.value); } catch (e) {} });
     }
     var driveBtn = document.getElementById("btn-drive-import");
@@ -569,6 +636,7 @@ function checkYtDlpUpdate() {
                 hostname: "api.github.com",
                 path: "/repos/yt-dlp/yt-dlp-nightly-builds/releases/latest",
                 method: "GET",
+                family: 4,
                 headers: { "User-Agent": "AutoEditorPPRO" }
             }, function (res) {
                 var data = "";
@@ -673,12 +741,32 @@ function _httpsGet(url, asBinary, cb, _depth) {
     if (!asBinary) headers["Accept"] = "application/vnd.github+json";
     var req;
     try {
-        req = https.request({ hostname: hostname, path: path, method: "GET", headers: headers }, function (res) {
+        // family: 4 → força IPv4. Em redes sem rota IPv6 funcional (comum em alguns
+        // provedores), o Node resolvia o googleapis.com/github.com pra IPv6 e a
+        // conexão dava ETIMEDOUT. Por IPv4 conecta normal.
+        req = https.request({ hostname: hostname, path: path, method: "GET", headers: headers, family: 4 }, function (res) {
             if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) && res.headers.location) {
                 return _httpsGet(res.headers.location, asBinary, cb, _depth + 1);
             }
             if (res.statusCode >= 400) {
-                cb(new Error("HTTP " + res.statusCode + " " + url));
+                // Lê o corpo do erro pra extrair o MOTIVO do Google (ex.:
+                // downloadQuotaExceeded, rateLimitExceeded, insufficientFilePermissions)
+                // — sem isso só sobrava "HTTP 403" sem pista do que fazer.
+                var ebody = "";
+                res.on("data", function (d) { if (ebody.length < 4000) ebody += d.toString(); });
+                res.on("end", function () {
+                    var reason = "";
+                    try {
+                        var ej = JSON.parse(ebody);
+                        if (ej && ej.error) {
+                            if (ej.error.errors && ej.error.errors[0] && ej.error.errors[0].reason) reason = ej.error.errors[0].reason;
+                            if (ej.error.status && !reason) reason = ej.error.status;
+                            if (ej.error.message) reason = (reason ? reason + ": " : "") + ej.error.message;
+                        }
+                    } catch (e) {}
+                    cb(new Error("HTTP " + res.statusCode + (reason ? " (" + reason + ")" : "") + " " + url));
+                });
+                res.on("error", function () { cb(new Error("HTTP " + res.statusCode + " " + url)); });
                 return;
             }
             if (asBinary) {
@@ -935,13 +1023,19 @@ function downloadYTToFolder(folder, url, onProgress, onDone, chooser) {
             if (typeof onProgress === "function") onProgress("analisando link…");
             probePlaylist(url, extDir, function (info) {
                 if (info && info.count > 1) {
-                    chooser(info.entries, function (selected) {
-                        if (!selected || !selected.length) {
-                            recLog("Seleção cancelada — nada baixado.", "warn");
-                            onDone(null, []); // [] = nenhum arquivo (consumidores ignoram)
-                            return;
-                        }
-                        runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, selected.join(","));
+                    // Modal serializado: com downloads em paralelo, só um seletor
+                    // aparece por vez (senão os overlays se atropelam). release() é
+                    // chamado assim que o usuário escolhe/cancela (modal fechou).
+                    _runWithModalLock(function (release) {
+                        chooser(info.entries, function (selected) {
+                            release();
+                            if (!selected || !selected.length) {
+                                recLog("Seleção cancelada — nada baixado.", "warn");
+                                onDone(null, []); // [] = nenhum arquivo (consumidores ignoram)
+                                return;
+                            }
+                            runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, selected.join(","));
+                        });
                     });
                 } else {
                     runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, "1");
@@ -965,16 +1059,25 @@ function probePlaylist(url, extDir, cb) {
     spawnEnv.PYTHONIOENCODING = "utf-8";
     // --extractor-retries: a Amazon serve página de captcha/anti-bot de forma
     // intermitente; sem retries extras o probe conta vídeos a menos ou falha.
-    var args = ["--flat-playlist", "--dump-single-json", "--no-warnings",
+    var args = ["-4", "--flat-playlist", "--dump-single-json", "--no-warnings",
                 "--extractor-retries", "10", "--retry-sleep", "extractor:2", url];
-    var out = "", ch;
+    var out = "", ch, cbCalled = false, timer = null;
+    // Garante cb único + mata o processo. SEM timeout, a sondagem da Amazon (que
+    // re-tenta 10x contra o anti-bot) podia ficar presa pra sempre em "analisando
+    // link…" e, como a fila era serial, travava TODOS os produtos seguintes.
+    function finishProbe(result) {
+        if (cbCalled) return; cbCalled = true;
+        if (timer) { try { clearTimeout(timer); } catch (e) {} }
+        try { if (ch && !ch.killed) ch.kill(); } catch (e) {}
+        cb(result);
+    }
     try { ch = cp.spawn(ytdlp, args, { windowsHide: true, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] }); }
-    catch (e) { cb(null); return; }
+    catch (e) { finishProbe(null); return; }
     try { ch.stdout.setEncoding("utf8"); ch.stderr.setEncoding("utf8"); } catch (e) {}
     ch.stdout.on("data", function (d) { out += d.toString(); });
-    ch.on("error", function () { cb(null); });
+    ch.on("error", function () { finishProbe(null); });
     ch.on("close", function () {
-        var j; try { j = JSON.parse(out); } catch (e) { cb(null); return; }
+        var j; try { j = JSON.parse(out); } catch (e) { finishProbe(null); return; }
         if (j && j.entries && j.entries.length) {
             var entries = [];
             for (var i = 0; i < j.entries.length; i++) {
@@ -986,11 +1089,17 @@ function probePlaylist(url, extDir, cb) {
                     thumbnail: e.thumbnail || ""
                 });
             }
-            cb({ count: entries.length, entries: entries });
+            finishProbe({ count: entries.length, entries: entries });
         } else {
-            cb({ count: 1, entries: [] });
+            finishProbe({ count: 1, entries: [] });
         }
     });
+    // Sondagem travada (>45s) → desiste e baixa o 1º vídeo direto (cb null). O
+    // download real tem watchdog/retry próprios, então não fica preso.
+    timer = setTimeout(function () {
+        recLog("Sondagem do link demorou demais (>45s) — seguindo com o 1º vídeo.", "warn");
+        finishProbe(null);
+    }, 45000);
 }
 
 // Modal de seleção (quando um link tem mais de um vídeo). Chama
@@ -1233,6 +1342,10 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
             : pmod.join(outDir, "%(title)s.%(ext)s");
 
         var args = ["-f", formatSel].concat(extraArgs).concat(selectArgs).concat(jsArgs).concat([
+            // -4 = força IPv4. Em redes sem rota IPv6 funcional, o yt-dlp tentava
+            // IPv6 (googlevideo/Amazon) e ficava SEM progresso até o watchdog
+            // abortar (2 min). Mesma causa do ETIMEDOUT do Node, agora no yt-dlp.
+            "-4",
             "--restrict-filenames", "--no-warnings",
             // A Amazon serve captcha/anti-bot intermitente; o extrator re-tenta a
             // página, mas o padrão (3) às vezes estoura → "Unable to extract data".
@@ -1401,7 +1514,31 @@ function getGeminiProducts() { var el = document.getElementById("gemini-products
 // concorrentes, modais de seleção colidindo e downloads travando sem erro (foi o
 // que segurou o PROD_4). Aqui as tarefas rodam UMA POR VEZ: cada uma recebe um
 // done() que DEVE ser chamado ao terminar; a próxima só começa depois.
-var _dlQueue = [], _dlRunning = false;
+var _dlQueue = [], _dlActive = 0, _DL_MAX_CONCURRENT = 3;
+
+// Lock global do modal de seleção (Amazon): só UM seletor de vídeos aparece por
+// vez, mesmo com vários downloads rodando em paralelo. Os outros esperam a vez
+// sem travar os downloads em si. Resolve a colisão de modais que antes obrigava
+// a baixar tudo em fila serial.
+var _modalBusy = false, _modalWaiters = [];
+function _runWithModalLock(task) {
+    // task(release): chamado quando o modal estiver livre; deve chamar release()
+    // assim que o modal fechar (usuário escolheu/cancelou).
+    _modalWaiters.push(task);
+    _pumpModal();
+}
+function _pumpModal() {
+    if (_modalBusy) return;
+    var task = _modalWaiters.shift();
+    if (!task) return;
+    _modalBusy = true;
+    var released = false;
+    task(function release() {
+        if (released) return; released = true;
+        _modalBusy = false;
+        _pumpModal();
+    });
+}
 
 // Decide se vale re-tentar um download que falhou. SÓ erros transitórios
 // (captcha intermitente da Amazon "Unable to extract data", rede, 5xx/429).
@@ -1428,13 +1565,18 @@ function _productPageHint(url) {
 
 function enqueueDownloadTask(taskFn) { _dlQueue.push(taskFn); _dlPump(); }
 function _dlPump() {
-    if (_dlRunning) return;
-    var task = _dlQueue.shift();
-    if (!task) return;
-    _dlRunning = true;
-    var doneCalled = false;
-    function done() { if (doneCalled) return; doneCalled = true; _dlRunning = false; _dlPump(); }
-    try { task(done); } catch (e) { done(); }
+    // Roda até _DL_MAX_CONCURRENT tarefas ao mesmo tempo (vários produtos baixando
+    // em paralelo). A colisão que motivou a fila serial era o MODAL de seleção da
+    // Amazon — agora resolvida pelo _runWithModalLock (só um seletor por vez).
+    while (_dlActive < _DL_MAX_CONCURRENT && _dlQueue.length) {
+        var task = _dlQueue.shift();
+        _dlActive++;
+        (function () {
+            var doneCalled = false;
+            function done() { if (doneCalled) return; doneCalled = true; _dlActive--; _dlPump(); }
+            try { task(done); } catch (e) { done(); }
+        })();
+    }
 }
 
 // Extrai o ID da pasta de um link do Drive ou aceita o ID puro.
@@ -1481,6 +1623,33 @@ function _extractLinksFromText(content) {
     return out;
 }
 
+// Se houver um "nomes_dos_produtos.txt" SOLTO na pasta-mãe do Drive, baixa e
+// preenche o campo da lista de produtos do Gemini (e salva por projeto). Assim
+// não precisa colar a lista na mão. O arquivo presente é a fonte de verdade.
+function _driveFillProductNames(apiKey, children) {
+    var f = null;
+    for (var i = 0; i < children.length; i++) {
+        var c = children[i];
+        if (c.mimeType === "application/vnd.google-apps.folder") continue;
+        if (/^nomes_dos_produtos\.txt$/i.test(String(c.name || "").replace(/^\s+|\s+$/g, ""))) { f = c; break; }
+    }
+    if (!f) return;
+    var url = "https://www.googleapis.com/drive/v3/files/" + f.id +
+              "?alt=media&supportsAllDrives=true&key=" + encodeURIComponent(apiKey);
+    _httpsGet(url, true, function (err, buf) {
+        if (err) { recLog("Drive: achei nomes_dos_produtos.txt mas não baixei: " + err.message, "warn"); return; }
+        var txt = "";
+        try { txt = buf.toString("utf8"); } catch (e) { txt = String(buf || ""); }
+        txt = txt.replace(/^\uFEFF/, "").replace(/\s+$/, ""); // remove BOM e espaço/linha final
+        var el = document.getElementById("gemini-products");
+        if (!el) { recLog("Drive: nomes_dos_produtos.txt achado, mas o campo da lista do Gemini não está visível.", "warn"); return; }
+        el.value = txt;
+        try { localStorage.setItem(_geminiProductsKey(), txt); } catch (e) {}
+        var n = txt.split(/\r?\n/).filter(function (l) { return l.replace(/^\s+|\s+$/g, ""); }).length;
+        recLog("Drive: nomes_dos_produtos.txt encontrado → lista do Gemini preenchida (" + n + " linha(s)).", "ok");
+    });
+}
+
 // Orquestra a importação: lê a pasta-mãe, acha as subpastas "N - Nome" e importa
 // cada produto em fila. renderCb(num, {stagedFiles, refPath, videoLinks}) cria o card.
 function importProductsFromDrive(apiKey, folderInput, renderCb) {
@@ -1497,6 +1666,8 @@ function importProductsFromDrive(apiKey, folderInput, renderCb) {
         recLog("Drive: listando subpastas…");
         _driveList(apiKey, folderId, function (err, children) {
             if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); return; }
+            // Preenche a lista do Gemini se houver nomes_dos_produtos.txt solto na pasta-mãe.
+            _driveFillProductNames(apiKey, children);
             var subs = [];
             children.forEach(function (c) {
                 if (c.mimeType !== "application/vnd.google-apps.folder") return;
@@ -2313,6 +2484,7 @@ function testGeminiConnection() {
         hostname: "generativelanguage.googleapis.com",
         path: "/v1beta/models?key=" + encodeURIComponent(key) + "&pageSize=500",
         method: "GET",
+        family: 4,
         headers: { "Content-Type": "application/json" }
     }, function(res) {
         var chunks = [];
@@ -2411,6 +2583,7 @@ function generateImageWithGemini(apiKey, model, prompt, refPngBase64, cb, logFn)
         hostname: "generativelanguage.googleapis.com",
         path: "/v1beta/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(apiKey),
         method: "POST",
+        family: 4,
         headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(payload)
@@ -2810,6 +2983,13 @@ function initProjectPersistence() {
             var projectPath = data.path || "";
             _projectKey = "autoeditor_" + projectPath;
             restoreProjectPaths();
+            // Restaura a lista do Gemini DESTE projeto (agora que _projectKey é o do
+            // projeto). Sem saved list pra este projeto → fica VAZIA (não herda de
+            // outro projeto). Evita usar lista errada de outro vídeo.
+            try {
+                var gp = document.getElementById("gemini-products");
+                if (gp) gp.value = localStorage.getItem(_geminiProductsKey()) || "";
+            } catch (eGP) {}
         } catch(e) { /* usa chave default */ }
     });
 }
@@ -3120,6 +3300,7 @@ function _callGemini(systemPrompt, userText, cb, _attempt) {
         hostname: "generativelanguage.googleapis.com",
         path: "/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(getGeminiKey()),
         method: "POST",
+        family: 4,
         headers: { "Content-Type": "application/json", "Content-Length": len }
     }, function (res) {
         var data = "";
@@ -5331,7 +5512,32 @@ function buildKeyPointItems(keyPoints, durations, mountProducts) {
 
 // ─── MOUNT (ExtendScript call) ────────────────────────────────────────────────
 
+// Anexa src_w/src_h (via ffprobe) a TODO item de vídeo que ainda não tem dims.
+// Sem isto o host depende do XMP/footage do Premiere — que falha em muitos .mp4
+// baixados — e o fundo borrado (vertical/quadrado) é pulado por "sem dims".
+// Imagens já trazem dims (getImageDimensions); templates/MOGRT não usam blur.
+function _fillVideoDimsForMount(mountData) {
+    var prods = mountData.products ? mountData.products
+              : (mountData.product ? [mountData.product] : []);
+    var probed = 0;
+    for (var p = 0; p < prods.length; p++) {
+        var tl = prods[p] && prods[p].timeline;
+        if (!tl || !tl.length) continue;
+        for (var i = 0; i < tl.length; i++) {
+            var it = tl[i];
+            if (!it || (it.src_w && it.src_h)) continue;
+            if (it.type !== "product_video" && it.type !== "stock_video") continue;
+            var path = it.bin_path || it.file || null;
+            if (!path) continue;
+            var d = getVideoDimensions(path);
+            if (d) { it.src_w = d.w; it.src_h = d.h; probed++; }
+        }
+    }
+    if (probed) log("Dimensões de vídeo (ffprobe): " + probed + " clip(s) marcado(s) pra fundo borrado.", "info");
+}
+
 function doMount(mountData, btn) {
+    try { _fillVideoDimsForMount(mountData); } catch (e) {}
     var jsonStr = JSON.stringify(mountData).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     cs.evalScript('mountFromJSON("' + jsonStr + '")', function (raw) {
         btn.disabled    = false;
