@@ -1,6 +1,70 @@
 // Auto Editor - Panel Logic
 
 var cs          = new CSInterface();
+
+// ─── PROJETO MANUAL (fallback) ────────────────────────────────────────────────
+// Se o Premiere não devolver a pasta do projeto, o usuário pode colar o caminho
+// do .prproj no painel. Como TODAS as chamadas passam por aqui, um único ponto
+// cobre os ~9 lugares que usam getProjectDir().
+function _aeManualProject() {
+    var raw = "";
+    try { raw = (localStorage.getItem("ae_manual_prproj") || "").replace(/^\s+|\s+$/g, ""); } catch (e) {}
+    if (!raw) return null;
+    raw = raw.replace(/^["']|["']$/g, "");
+    var i = Math.max(raw.lastIndexOf("\\"), raw.lastIndexOf("/"));
+    if (i < 0) return null;
+    var dir  = raw.substring(0, i);
+    var base = raw.substring(i + 1);
+    var prj  = base.replace(/\.[^.]+$/, "");
+    if (!dir || !prj) return null;
+    return { dir: dir, prj: prj };
+}
+
+function _aeIsGetProjectDir(script) {
+    return /^\s*getProjectDir\(\s*\)\s*;?\s*$/.test(String(script || ""));
+}
+
+function _aeEvalRaw(script, cb) {
+    CSInterface.prototype.evalScript.call(cs, script, cb || function () {});
+}
+
+// O host tem prioridade; o manual só entra se ele não devolver a pasta.
+cs.evalScript = function (script, callback) {
+    if (!_aeIsGetProjectDir(script)) { _aeEvalRaw(script, callback); return; }
+    _aeEvalRaw(script, function (r) {
+        var dir = "";
+        try { dir = (JSON.parse(r) || {}).dir || ""; } catch (eP) {}
+        if (dir) { if (callback) callback(r); return; }
+        var man = _aeManualProject();
+        if (man) {
+            if (callback) callback(JSON.stringify({ dir: man.dir, seq: "", prj: man.prj, manual: true }));
+            return;
+        }
+        if (callback) callback(r);
+    });
+};
+
+// Liga o campo do painel ao armazenamento (salva enquanto digita).
+function _aeSetupManualProject() {
+    var inp = document.getElementById("manual-prproj");
+    var st  = document.getElementById("manual-prproj-status");
+    if (!inp) return;
+    var pinta = function () {
+        var man = _aeManualProject();
+        if (!st) return;
+        st.textContent = man
+            ? ("manual ativo: " + man.prj + "  —  " + man.dir)
+            : "usando o projeto aberto no Premiere";
+        st.style.color = man ? "#5fbf5f" : "";
+    };
+    try { inp.value = localStorage.getItem("ae_manual_prproj") || ""; } catch (e) {}
+    inp.addEventListener("input", function () {
+        try { localStorage.setItem("ae_manual_prproj", inp.value || ""); } catch (e2) {}
+        pinta();
+    });
+    pinta();
+}
+
 var loadedJSON  = null;  // objeto JSON de mapeamento carregado
 var transcriptWords = []; // palavras com timestamps (Premiere JSON) — modo preciso
 var srtEntries  = [];    // entradas SRT — fallback
@@ -64,6 +128,7 @@ var _createdProducts = [];
 // ─── INIT ────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", function () {
+    _aeSetupManualProject();
     loadConfig();
     initTabs();
     initMontar();
@@ -182,7 +247,9 @@ function refreshChaptersFromMarkers() {
         } else if (r && r.ok) {
             if (status) status.textContent = "nenhum marcador na sequência ativa";
         } else {
-            if (status) status.textContent = "erro: " + (r.error || "desconhecido");
+            // Sem r.error quase sempre significa que o host não devolveu JSON
+            // (ex.: "EvalScript error."). Mostra a resposta crua pra diagnosticar.
+            if (status) status.textContent = "erro: " + (r.error || ("resposta do host: " + String(raw).slice(0, 160)));
         }
     });
 }
@@ -512,6 +579,18 @@ function initMontar() {
     document.getElementById("btn-load-srt").addEventListener("click",  openSRTPicker);
     document.getElementById("btn-load-from-folder").addEventListener("click", loadJSONsFromProjectFolder);
     document.getElementById("btn-mount").addEventListener("click", mountVideo);
+
+    // Música de fundo (por sigla): Procurar / Limpar / volume.
+    var bgmBrowse = document.getElementById("btn-browse-bgm");
+    if (bgmBrowse) bgmBrowse.addEventListener("click", function () {
+        cs.evalScript("selectAudioFile()", function (raw) {
+            try { var r = JSON.parse(raw); if (r && r.path) { var e = document.getElementById("bgm-path"); if (e) e.value = r.path; _bgmSaveCurrent(); } } catch (eP) {}
+        });
+    });
+    var bgmClear = document.getElementById("btn-clear-bgm");
+    if (bgmClear) bgmClear.addEventListener("click", function () { var e = document.getElementById("bgm-path"); if (e) e.value = ""; _bgmSaveCurrent(); });
+    var bgmVol = document.getElementById("bgm-volume");
+    if (bgmVol) { bgmVol.addEventListener("change", _bgmSaveCurrent); bgmVol.addEventListener("input", _bgmSaveCurrent); }
 }
 
 // ─── RECURSOS (setup: bins de produto + sequências de template) ───────────────
@@ -809,7 +888,12 @@ function _httpsGet(url, asBinary, cb, _depth) {
                             if (ej.error.status && !reason) reason = ej.error.status;
                             if (ej.error.message) reason = (reason ? reason + ": " : "") + ej.error.message;
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        // Corpo não-JSON: página anti-abuso do Google ("Sorry…/automated
+                        // queries") = throttle POR IP/REDE (não é cota da API). Some em horas.
+                        if (/automated queries|We.?re sorry|unusual traffic/i.test(ebody))
+                            reason = "Google bloqueou temporariamente esta REDE por excesso de downloads (aguarde algumas horas)";
+                    }
                     cb(new Error("HTTP " + res.statusCode + (reason ? " (" + reason + ")" : "") + " " + url));
                 });
                 res.on("error", function () { cb(new Error("HTTP " + res.statusCode + " " + url)); });
@@ -1308,10 +1392,6 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
     try { fs.mkdirSync(outDir, { recursive: true }); }
     catch (e) { fail("Erro criando pasta '" + outDir + "': " + e.message); return; }
 
-    // Arquivo de histórico (resume): yt-dlp registra cada vídeo já baixado aqui e,
-    // numa re-execução (ex. Premiere fechou no meio), PULA os que já terminaram.
-    // Fica na raiz dos downloads do projeto (vale pra todos os produtos).
-    var ytArchive = pmod.join(prjDir, "AutoEditor_Downloads", "_yt_archive.txt");
 
     // Limpa arquivos órfãos de execuções anteriores (manifests HLS, .part etc).
     // Se ficar um .m3u8 antigo de um download falho, o yt-dlp tenta usá-lo como
@@ -1397,9 +1477,17 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
             // IPv6 (googlevideo/Amazon) e ficava SEM progresso até o watchdog
             // abortar (2 min). Mesma causa do ETIMEDOUT do Node, agora no yt-dlp.
             "-4",
-            // Resume: --continue retoma o .part de onde parou; --download-archive
-            // pula vídeos JÁ baixados (Premiere fechou no meio → retoma só o que falta).
-            "--continue", "--download-archive", ytArchive,
+            // Resume: --continue retoma o .part de onde parou. NÃO usamos
+            // --download-archive: o extractor da Amazon dá o MESMO id pra TODOS os
+            // vídeos (id da loja, ex. ATVPDKIKX0DER) — o archive colapsava tudo e
+            // pulava produtos inteiros. O resume por produto é feito no import
+            // (vidsComplete pula o download quando os vídeos já estão na pasta).
+            "--continue",
+            // YouTube: "Sign in to confirm you're not a bot". Os clientes tv/web_safari/
+            // mweb DRIBLAM o bot-check (sem cookies) E oferecem os formatos DASH (avc1
+            // até 1080p). O default (bloqueado) fica só de fallback. Ignorado por outros
+            // sites (Amazon), então é seguro passar sempre.
+            "--extractor-args", "youtube:player_client=tv,web_safari,mweb,default",
             "--restrict-filenames", "--no-warnings",
             // A Amazon serve captcha/anti-bot intermitente; o extrator re-tenta a
             // página, mas o padrão (3) às vezes estoura → "Unable to extract data".
@@ -1413,10 +1501,12 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
 
         var ytFinalPath = "", ytPaths = [], lastPctReported = -1, lastActivityMs = Date.now();
         var _archiveSkipped = false; // vídeo já no _yt_archive.txt (resume) → não é falha
+        var _lastError = "";         // última linha ERROR do yt-dlp (pra retry reconhecer)
         function processLine(line) {
             var s = line.replace(/\r$/, "").trim();
             if (!s) return;
             if (/has already been recorded in the archive|has already been downloaded/i.test(s)) { _archiveSkipped = true; }
+            if (/^ERROR:/i.test(s)) _lastError = s.replace(/^ERROR:\s*/i, "");
             var pct = s.match(/\[download\]\s+([\d.]+)%/);
             if (pct) {
                 var n = Math.floor(parseFloat(pct[1]) / 5) * 5;
@@ -1501,7 +1591,7 @@ function runYtDlp(url, folder, extDir, prjDir, onProgress, onDone, playlistItems
             if (_killedByWatchdog) { fail("download abortado (sem progresso por 2 min)"); return; }
             if (outSink.buf) processLine(outSink.buf);
             if (errSink.buf) processLine(errSink.buf);
-            if (code !== 0) { fail("yt-dlp encerrou com código " + code); return; }
+            if (code !== 0) { fail(_lastError || ("yt-dlp encerrou com código " + code)); return; }
             // Valida os caminhos coletados via --print (remove inexistentes).
             ytPaths = ytPaths.filter(function (p) { try { return fs.existsSync(p); } catch (e) { return false; } });
 
@@ -1576,6 +1666,89 @@ function _normProjectKey(name) {
     return m[1].toUpperCase() + parseInt(m[2], 10);
 }
 
+// Só a SIGLA (letras iniciais) do nome do projeto, ex. "GT 14" → "GT".
+function _projectSigla(name) {
+    var m = String(name || "").match(/([A-Za-z]+)/);
+    return m ? m[1].toUpperCase() : "";
+}
+
+// ── Música de fundo: caminho + volume salvos POR SIGLA ───────────────────────
+var BGM_STORAGE_PREFIX = "autoeditor_bgmusic_";   // + SIGLA → {path, volume}
+var _bgmSigla = "";                               // sigla do projeto aberto
+function getBgmForSigla(sigla) {
+    if (!sigla) return null;
+    try { var raw = localStorage.getItem(BGM_STORAGE_PREFIX + sigla); if (raw) return JSON.parse(raw); } catch (e) {}
+    return null;
+}
+function saveBgmForSigla(sigla, path, volume) {
+    if (!sigla) return;
+    var v = parseInt(volume, 10); if (isNaN(v)) v = 15; v = Math.max(0, Math.min(100, v));
+    try { localStorage.setItem(BGM_STORAGE_PREFIX + sigla, JSON.stringify({ path: path || "", volume: v })); } catch (e) {}
+}
+// Carrega o caminho/volume da sigla do projeto nos campos da UI.
+function _bgmLoadForProject(prjName) {
+    _bgmSigla = _projectSigla(prjName);
+    var siglaEl = document.getElementById("bgm-sigla");
+    if (siglaEl) siglaEl.textContent = _bgmSigla ? "(" + _bgmSigla + ")" : "";
+    var pathEl = document.getElementById("bgm-path"), volEl = document.getElementById("bgm-volume");
+    var data = getBgmForSigla(_bgmSigla);
+    if (pathEl) pathEl.value = (data && data.path) ? data.path : "";
+    if (volEl)  volEl.value  = (data && data.volume != null) ? data.volume : 15;
+}
+// Salva o que está nos campos sob a sigla atual.
+function _bgmSaveCurrent() {
+    if (!_bgmSigla) return;
+    var pathEl = document.getElementById("bgm-path"), volEl = document.getElementById("bgm-volume");
+    saveBgmForSigla(_bgmSigla, pathEl ? pathEl.value : "", volEl ? volEl.value : 15);
+}
+
+// Gera a trilha de fundo (ffmpeg: loop até cobrir o vídeo + volume + fade-out) e
+// insere na faixa A2 da timeline. Chamado no fim da montagem. No-op se não houver
+// música salva pra sigla. Volume é % linear (15% ≈ -16 dB).
+function _insertBackgroundMusic(done) {
+    done = done || function () {};
+    var data = getBgmForSigla(_bgmSigla);
+    if (!data || !data.path) { done(); return; } // nenhuma música pra esta sigla
+    var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path'), cp = tryNodeRequire('child_process');
+    if (!fs || !pmod || !cp) { done(); return; }
+    if (!fs.existsSync(data.path)) { log("Música de fundo: arquivo não encontrado — " + data.path, "warn"); done(); return; }
+    cs.evalScript("getSequenceDuration()", function (rawD) {
+        var dur = 0; try { dur = (JSON.parse(rawD) || {}).dur || 0; } catch (e) {}
+        if (!(dur > 0.5)) { log("Música de fundo: não consegui a duração da timeline — pulei.", "warn"); done(); return; }
+        cs.evalScript("getProjectDir()", function (rawPrj) {
+            var prjDir = ""; try { prjDir = (JSON.parse(rawPrj) || {}).dir || ""; } catch (e) {}
+            if (!prjDir) { done(); return; }
+            var vol = (data.volume != null ? data.volume : 15) / 100;
+            var extDir = getExtensionRootClient();
+            var ff = pmod.join(extDir, "bin", "ffmpeg.exe");
+            var outPath = pmod.join(prjDir, "_bgmusic.wav");
+            var fadeStart = Math.max(0, dur - 1.5);
+            var args = ["-y", "-stream_loop", "-1", "-i", data.path, "-t", dur.toFixed(3),
+                        "-af", "volume=" + vol.toFixed(3) + ",afade=t=out:st=" + fadeStart.toFixed(3) + ":d=1.5",
+                        "-c:a", "pcm_s16le", outPath];
+            log("Música de fundo: gerando trilha (" + Math.round(dur) + "s, vol " + data.volume + "%, loop)…", "info");
+            var ch;
+            try { ch = cp.spawn(ff, args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] }); }
+            catch (eSp) { log("Música de fundo: ffmpeg não iniciou.", "err"); done(); return; }
+            var err = "";
+            ch.stderr.on("data", function (d) { if (err.length < 3000) err += d.toString(); });
+            ch.on("close", function (code) {
+                if (code !== 0) {
+                    var hint = /permission denied/i.test(err) ? " (o _bgmusic.wav pode estar aberto na timeline; remova-o e monte de novo)" : "";
+                    log("Música de fundo: ffmpeg falhou (" + code + ")" + hint + ": " + err.slice(-160), "err"); done(); return;
+                }
+                var esc = outPath.replace(/\\/g, "\\\\");
+                cs.evalScript('insertBackgroundMusicHost("' + esc + '", 0)', function (r2) {
+                    var ok = false, e2 = "", trk = ""; try { var d2 = JSON.parse(r2); ok = !!d2.success; e2 = d2.error || ""; trk = d2.track || ""; } catch (eP) {}
+                    if (ok) log("✅ Música de fundo inserida em " + trk + " (faixa vazia, loop, vol " + data.volume + "%).", "ok");
+                    else log("Música de fundo: falha ao inserir — " + e2, "warn");
+                    done();
+                });
+            });
+        });
+    });
+}
+
 // Cache (por sessão) dos canais = subpastas da raiz. Evita re-listar a raiz a
 // cada importação. _driveResetChannelCache() limpa (ex. botão "atualizar").
 var _driveChannelCache = null;
@@ -1585,10 +1758,15 @@ function _driveResetChannelCache() { _driveChannelCache = null; }
 // contra as subpastas de cada canal. Para no 1º match (sigla é única por canal).
 // cb(err, { id, name, channel } | null).
 function _driveFindProjectFolder(apiKey, rootId, key, cb) {
-    function searchChannels(channels) {
+    function searchChannels(channels, allowRefresh) {
         var ci = 0;
         (function nextChannel() {
-            if (ci >= channels.length) { cb(null, null); return; } // varreu tudo, sem match
+            if (ci >= channels.length) {
+                // Varreu tudo sem achar. Se estava no cache, re-lista a raiz (pode ter
+                // canal/projeto NOVO criado nesta sessão) e tenta 1x mais.
+                if (allowRefresh) { _driveChannelCache = null; loadAndSearch(false); return; }
+                cb(null, null); return;
+            }
             var ch = channels[ci++];
             _driveList(apiKey, ch.id, function (err, files) {
                 if (err) { recLog("Drive: erro listando canal '" + ch.name + "': " + err.message, "warn"); nextChannel(); return; }
@@ -1601,16 +1779,19 @@ function _driveFindProjectFolder(apiKey, rootId, key, cb) {
             });
         })();
     }
-    if (_driveChannelCache) { searchChannels(_driveChannelCache); return; }
-    _driveList(apiKey, rootId, function (err, files) {
-        if (err) { cb(err); return; }
-        var channels = [];
-        files.forEach(function (f) {
-            if (f.mimeType === "application/vnd.google-apps.folder") channels.push({ id: f.id, name: f.name });
+    function loadAndSearch(allowRefresh) {
+        if (_driveChannelCache) { searchChannels(_driveChannelCache, allowRefresh); return; }
+        _driveList(apiKey, rootId, function (err, files) {
+            if (err) { cb(err); return; }
+            var channels = [];
+            files.forEach(function (f) {
+                if (f.mimeType === "application/vnd.google-apps.folder") channels.push({ id: f.id, name: f.name });
+            });
+            _driveChannelCache = channels;
+            searchChannels(channels, false); // lista fresca → não re-atualiza de novo
         });
-        _driveChannelCache = channels;
-        searchChannels(channels);
-    });
+    }
+    loadAndSearch(true); // usa cache se houver; se não achar, re-lista a raiz 1x
 }
 
 // Importa a pasta do projeto ATUAL: resolve sigla+número pelo nome do .prproj,
@@ -1630,7 +1811,7 @@ function importFromProjectName(renderCb, silent, onResult) {
         try { var rp = JSON.parse(rawPrj); prj = rp.prj || ""; } catch (e) {}
         // Cold-start: app.project.path às vezes vem vazio na 1ª chamada logo após
         // abrir o painel. Não é erro — sinaliza "notready" pro auto re-tentar.
-        if (!prj) { if (!silent) recLog("Drive: salve o projeto primeiro (preciso do nome do .prproj).", "warn"); onResult("notready"); return; }
+        if (!prj) { if (!silent) recLog("Drive: salve o projeto primeiro (preciso do nome do .prproj). [DIAG getProjectDir: " + String(rawPrj).slice(0, 180) + "]", "warn"); onResult("notready"); return; }
         var key = _normProjectKey(prj);
         if (!key) { recLog("Drive: nome '" + prj + "' sem padrão SIGLA+NÚMERO — use o ID manual.", "warn"); onResult("error"); return; }
         recLog("Drive: procurando a pasta do projeto '" + prj + "' (chave " + key + ") na raiz…");
@@ -1700,9 +1881,12 @@ function _globalAudioDir() {
     return dir;
 }
 
-// Acha o áudio na pasta. 1º critério: ter um áudio. Desempate (vários): nome
-// igual ao do projeto (normalizado), senão o mais recente. Ignora os *_cut.
-function _findAudioFile(folder, projectName) {
+// Acha o áudio na pasta. Ignora os *_cut.
+// strict=true (auto): SÓ aceita áudio com nome equivalente ao projeto (exato ou
+//   sigla+número) — senão retorna null (não pega áudio aleatório).
+// strict=false (manual): nome equivalente tem prioridade; senão, único → ele;
+//   vários → o mais recente.
+function _findAudioFile(folder, projectName, strict) {
     var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
     if (!fs || !pmod || !folder) return null;
     var names; try { names = fs.readdirSync(folder); } catch (e) { return null; }
@@ -1717,13 +1901,16 @@ function _findAudioFile(folder, projectName) {
         cands.push({ name: n, path: p, mtime: m, base: n.substring(0, dot) });
     });
     if (!cands.length) return null;
-    if (cands.length === 1) return cands[0];
+    // 1) áudio com nome equivalente ao projeto (exato OU sigla+número normalizada).
     var pkey = _normProjectKey(projectName), pl = String(projectName || "").toLowerCase();
     for (var i = 0; i < cands.length; i++) {
-        if (cands[i].base.toLowerCase() === pl) return cands[i];          // nome exato do projeto
-        if (pkey && _normProjectKey(cands[i].base) === pkey) return cands[i]; // sigla+número
+        if (cands[i].base.toLowerCase() === pl) return cands[i];
+        if (pkey && _normProjectKey(cands[i].base) === pkey) return cands[i];
     }
-    cands.sort(function (a, b) { return b.mtime - a.mtime; });            // senão, mais recente
+    if (strict) return null; // auto: sem nome equivalente → não pega nada
+    // 2) permissivo (manual): único → ele; vários → mais recente.
+    if (cands.length === 1) return cands[0];
+    cands.sort(function (a, b) { return b.mtime - a.mtime; });
     return cands[0];
 }
 
@@ -1833,23 +2020,37 @@ function _generateCutAudio(audioPath, keeps, outPath, cb) {
 }
 
 // Orquestra: acha áudio → detecta → corta → insere na timeline. cb(status):
-// "ok" | "notfound" | "error". silent=true (auto) reduz logs de "configure".
-function cutSilenceAndInsert(cb) {
+// "ok" | "notfound" | "error" | "notready" (projeto ainda carregando) | "skip"
+// (strict: projeto sem nomenclatura de produto). strict=true (auto): só roda em
+// projeto "SIGLA N" e só com áudio de nome equivalente.
+function cutSilenceAndInsert(cb, strict) {
     cb = cb || function () {};
     var pmod = tryNodeRequire('path');
     cs.evalScript("getProjectDir()", function (rawPrj) {
         var prjDir = "", prj = "";
         try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; prj = rp.prj || ""; } catch (e) {}
-        if (!prjDir) { recLog("Áudio: salve o projeto primeiro (preciso da pasta do .prproj).", "warn"); cb("error"); return; }
+        if (!prjDir) { if (!strict) recLog("Áudio: salve o projeto primeiro (preciso da pasta do .prproj).", "warn"); cb("notready"); return; }
+        // Auto: só projetos com nomenclatura de produto (ex. "MT 89" → MT89).
+        if (strict && !_normProjectKey(prj)) { cb("skip"); return; }
         // Acha o áudio: 1º na pasta do PROJETO; se não houver, cai na GLOBAL
-        // Music\AutoEditor (fallback automático — sem precisar escolher).
-        var found = _findAudioFile(prjDir, prj);
+        // Music\AutoEditor. strict exige nome EQUIVALENTE ao projeto (não pega aleatório).
+        var found = _findAudioFile(prjDir, prj, strict);
         if (!found) {
             var gdir = _globalAudioDir();
-            if (gdir) found = _findAudioFile(gdir, prj);
+            if (gdir) found = _findAudioFile(gdir, prj, strict);
         }
         if (!found) { cb("notfound"); return; }
-        var folder = pmod.dirname(found.path); // pasta onde o áudio está (o _cut vai aqui)
+
+        // Já cortado antes? No AUTO, pula — evita re-cortar e o "Permission denied"
+        // que rola quando o _cut.wav já está aberto/travado na timeline do Premiere.
+        var outPath0 = pmod.join(prjDir, found.base + "_cut.wav");
+        try {
+            var _fsChk = tryNodeRequire('fs');
+            if (strict && _fsChk && _fsChk.existsSync(outPath0)) {
+                recLog("Áudio: '" + found.base + "_cut.wav' já existe — corte pulado.", "info");
+                cb("skip"); return;
+            }
+        } catch (eChk) {}
 
         recLog("Áudio: '" + found.name + "' — detectando silêncios (" + SILENCE_THRESHOLD_DB + "dB / " + SILENCE_MIN_DURATION + "s)…");
         _detectSilenceRMS(found.path, function (err, res) {
@@ -1857,7 +2058,9 @@ function cutSilenceAndInsert(cb) {
             var keeps = _buildKeepSegments(res.duration, res.silences);
             var keptDur = keeps.reduce(function (a, k) { return a + (k.end - k.start); }, 0);
             var removed = res.duration - keptDur;
-            var outPath = pmod.join(folder, found.base + "_cut.wav");
+            // O _cut.wav vai pra pasta do PROJETO (junto do .prproj), não pra pasta
+            // de origem do áudio (que pode ser a global Music\AutoEditor).
+            var outPath = pmod.join(prjDir, found.base + "_cut.wav");
 
             function insert(finalPath, label) {
                 var esc = String(finalPath).replace(/\\/g, "\\\\");
@@ -1876,7 +2079,11 @@ function cutSilenceAndInsert(cb) {
             }
             recLog("Áudio: " + res.silences.length + " silêncio(s), removendo " + removed.toFixed(1) + "s (de " + res.duration.toFixed(1) + "s) → cortando…");
             _generateCutAudio(found.path, keeps, outPath, function (e3, out) {
-                if (e3) { recLog("✗ Áudio: corte falhou: " + e3.message, "err"); cb("error"); return; }
+                if (e3) {
+                    var hint = /permission denied/i.test(e3.message)
+                        ? " — o " + found.base + "_cut.wav pode estar aberto na timeline; remova-o e tente de novo." : "";
+                    recLog("✗ Áudio: corte falhou: " + e3.message + hint, "err"); cb("error"); return;
+                }
                 insert(out, found.base + "_cut.wav");
             });
         });
@@ -1897,15 +2104,16 @@ function _attemptAudioCut(path, tries) {
     if (_audioCutState[path] === "done") return;
     _audioCutState[path] = "running";
     cutSilenceAndInsert(function (status) {
-        if (status === "notfound") {
-            _audioCutState[path] = null;                 // libera pra próxima tentativa
-            if (path !== _lastSeenProjectPath) return;
-            if (tries === 0) recLog("Áudio: nenhum arquivo na pasta ainda — tentando de novo a cada 15s…", "info");
-            setTimeout(function () { _attemptAudioCut(path, tries + 1); }, 15000);
-        } else {
-            _audioCutState[path] = "done";               // ok ou erro real: não fica em loop
-        }
-    });
+        // skip = projeto sem nomenclatura de produto → auto-corte não roda (silencioso).
+        // ok/error = terminou. notready (cold-start) / notfound (áudio ainda não está
+        // lá) → re-tenta: notready rápido (3s), notfound a cada 15s.
+        if (status === "skip" || status === "ok" || status === "error") { _audioCutState[path] = "done"; return; }
+        _audioCutState[path] = null;                     // libera pra próxima tentativa
+        if (path !== _lastSeenProjectPath) return;
+        if (tries >= 40) { recLog("Áudio (auto): desisti de esperar o áudio com nome equivalente. Use o botão manual.", "warn"); _audioCutState[path] = "done"; return; }
+        if (status === "notfound" && tries === 0) recLog("Áudio: ainda não há áudio com nome equivalente ao projeto — tentando a cada 15s…", "info");
+        setTimeout(function () { _attemptAudioCut(path, tries + 1); }, status === "notready" ? 3000 : 15000);
+    }, true); // strict: auto só em projeto "SIGLA N" + áudio de nome equivalente
 }
 
 // Geração do mapeamento via Gemini (fallback quando não há *_autoeditor.json).
@@ -2050,7 +2258,7 @@ function _extractLinksFromText(content) {
 // Se houver um "nomes_dos_produtos.txt" SOLTO na pasta-mãe do Drive, baixa e
 // preenche o campo da lista de produtos do Gemini (e salva por projeto). Assim
 // não precisa colar a lista na mão. O arquivo presente é a fonte de verdade.
-function _driveFillProductNames(apiKey, children) {
+function _driveFillProductNames(apiKey, children, prjDir) {
     var f = null;
     for (var i = 0; i < children.length; i++) {
         var c = children[i];
@@ -2069,6 +2277,14 @@ function _driveFillProductNames(apiKey, children) {
         if (!el) { recLog("Drive: nomes_dos_produtos.txt achado, mas o campo da lista do Gemini não está visível.", "warn"); return; }
         el.value = txt;
         try { localStorage.setItem(_geminiProductsKey(), txt); } catch (e) {}
+        // Salva também na PASTA do projeto (fonte em disco) — assim o "Carregar
+        // pasta" gera o mapeamento numa sessão nova, sem depender do localStorage.
+        if (prjDir) {
+            try {
+                var _fsN = tryNodeRequire('fs'), _pmN = tryNodeRequire('path');
+                if (_fsN && _pmN) _fsN.writeFileSync(_pmN.join(prjDir, "nomes_dos_produtos.txt"), txt, "utf8");
+            } catch (eW) {}
+        }
         var n = txt.split(/\r?\n/).filter(function (l) { return l.replace(/^\s+|\s+$/g, ""); }).length;
         recLog("Drive: nomes_dos_produtos.txt encontrado → lista do Gemini preenchida (" + n + " linha(s)).", "ok");
     });
@@ -2076,6 +2292,17 @@ function _driveFillProductNames(apiKey, children) {
 
 // Orquestra a importação: lê a pasta-mãe, acha as subpastas "N - Nome" e importa
 // cada produto em fila. renderCb(num, {stagedFiles, refPath, videoLinks}) cria o card.
+// Pega a pasta do projeto com RETRY (o app.project.path às vezes vem vazio no
+// primeiro instante após abrir o painel, mesmo com o projeto salvo — cold-start).
+function _withProjectDir(cb, tries) {
+    tries = tries || 0;
+    cs.evalScript("getProjectDir()", function (raw) {
+        var dir = ""; try { dir = (JSON.parse(raw) || {}).dir || ""; } catch (e) {}
+        if (!dir && tries < 6) { setTimeout(function () { _withProjectDir(cb, tries + 1); }, 2000); return; }
+        cb(dir, raw);
+    });
+}
+
 function importProductsFromDrive(apiKey, folderInput, renderCb) {
     var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
     if (!fs || !pmod) { recLog("Node indisponível.", "err"); return; }
@@ -2083,16 +2310,15 @@ function importProductsFromDrive(apiKey, folderInput, renderCb) {
     var folderId = _driveExtractFolderId(folderInput);
     if (!folderId) { recLog("Link/ID da pasta inválido.", "err"); return; }
 
-    cs.evalScript("getProjectDir()", function (rawPrj) {
-        var prjDir = ""; try { prjDir = (JSON.parse(rawPrj) || {}).dir || ""; } catch (e) {}
-        if (!prjDir) { recLog("Salve o projeto antes (as imagens/vídeos vão pra pasta ao lado do .prproj).", "err"); return; }
+    _withProjectDir(function (prjDir, raw) {
+        if (!prjDir) { recLog("Salve o projeto antes — o Premiere não devolveu a pasta. [DIAG getProjectDir: " + String(raw).slice(0, 180) + "]", "err"); return; }
 
         recLog("Drive: listando subpastas…");
         _driveStatsReset(); _failedDownloads = []; _driveImportRunning = true; _driveAwaitingDrain = true;
         _driveList(apiKey, folderId, function (err, children) {
             if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); _driveImportRunning = false; _driveAwaitingDrain = false; return; }
             // Preenche a lista do Gemini se houver nomes_dos_produtos.txt solto na pasta-mãe.
-            _driveFillProductNames(apiKey, children);
+            _driveFillProductNames(apiKey, children, prjDir);
             var subs = [];
             children.forEach(function (c) {
                 if (c.mimeType !== "application/vnd.google-apps.folder") return;
@@ -2162,8 +2388,9 @@ function _driveImportOneProduct(apiKey, prjDir, sub, renderCb, done) {
             downloadAll(txts, "txt", function () {
                 if (!pngPath && imgPaths.length) pngPath = imgPaths[0]; // sem .png → 1ª imagem
                 // Resume: re-stageia vídeos JÁ baixados (de importação anterior) que
-                // estão na pasta PROD — o download os pula via --download-archive, então
-                // sem isto eles não entrariam no card recriado. Ignora .part incompletos.
+                // estão na pasta PROD. Junto com vidsComplete (que pula o download
+                // quando já há vídeos suficientes), garante que eles entrem no card
+                // recriado sem re-baixar. Ignora .part incompletos.
                 var existingVids = [];
                 try {
                     fs.readdirSync(outDir).forEach(function (n) {
@@ -3491,6 +3718,14 @@ function _watchProjectChanges() {
                 var gp = document.getElementById("gemini-products");
                 if (gp) gp.value = localStorage.getItem(_geminiProductsKey()) || "";
             } catch (eGP) {}
+            // Música de fundo por sigla (deriva o nome do projeto do caminho do .prproj).
+            try { _bgmLoadForProject(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eBg) {}
+
+            // Rename da sequência DESLIGADO: `seq.name = ...` derruba a engine do
+            // ExtendScript em algumas versões do Premiere (crash nativo → todo
+            // evalScript vira "EvalScript error." até reiniciar o Premiere). Reativar
+            // só depois de achar um jeito seguro de renomear (QE ou método writable).
+            // try { _maybeRenameSequence(path); } catch (eRn) {}
 
             // (2) Auto-import (opt-in). Guardas: toggle on + raiz + 1x por sessão +
             // sem cards na tela (evita duplicar produtos já restaurados).
@@ -3510,8 +3745,70 @@ function _watchProjectChanges() {
             // (3) Auto-corte de silêncio (independente do Drive): se ligado, corta
             // o áudio da pasta e insere na timeline (com retry de 15s até achar).
             try { _maybeAutoCutSilence(path); } catch (eAC) {}
+
+            // (4) Auto-carregar/gerar mapeamento: em projeto de produto (SIGLA N),
+            // quando aparece a transcrição (.json) na pasta, carrega e gera o
+            // mapeamento sozinho (sem precisar do botão "Carregar pasta").
+            try { _attemptAutoLoadMapping(path, 0); } catch (eAM) {}
         });
     }, 5000);
+}
+
+// Watcher do mapeamento: em projeto com nomenclatura de produto, espera a
+// transcrição (.json com .segments) aparecer na pasta e dispara o carregamento +
+// geração do mapeamento UMA vez. Roda só pra projetos de produto (gateado) e
+// para assim que acha — leve (não pesa editando outros vídeos).
+var _autoMapState = {}; // path -> "done"
+function _attemptAutoLoadMapping(path, tries) {
+    if (path !== _lastSeenProjectPath) return;
+    if (_autoMapState[path] === "done") return;
+    cs.evalScript("getProjectDir()", function (rawPrj) {
+        if (path !== _lastSeenProjectPath) return;
+        var prjDir = "", prj = "";
+        try { var rp = JSON.parse(rawPrj); prjDir = rp.dir || ""; prj = rp.prj || ""; } catch (e) {}
+        if (!prjDir) { if (tries < 12) setTimeout(function () { _attemptAutoLoadMapping(path, tries + 1); }, 3000); return; } // cold-start
+        if (!_normProjectKey(prj)) { _autoMapState[path] = "done"; return; } // não-convenção → não mexe
+        var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+        if (!fs || !pmod) { _autoMapState[path] = "done"; return; }
+        var names; try { names = fs.readdirSync(prjDir); } catch (e) { _autoMapState[path] = "done"; return; }
+        var hasMapping = false, hasTranscript = false;
+        names.forEach(function (n) {
+            if (!/\.json$/i.test(n)) return;
+            if (/_autoeditor\.json$/i.test(n)) { hasMapping = true; return; }
+            try { var d = JSON.parse(fs.readFileSync(pmod.join(prjDir, n), "utf8")); if (d && d.segments) hasTranscript = true; } catch (e) {}
+        });
+        if (hasMapping || hasTranscript) {
+            _autoMapState[path] = "done";
+            log("Auto: " + (hasMapping ? "mapeamento" : "transcrição") + " na pasta — carregando" + (hasMapping ? "" : " e gerando o mapeamento") + "…", "info");
+            try { loadJSONsFromProjectFolder(); } catch (eL) {}
+            return;
+        }
+        // nada ainda → re-tenta (cap ~5min); aguarda a transcrição (plugin UXP) aparecer.
+        if (tries < 60) setTimeout(function () { _attemptAutoLoadMapping(path, tries + 1); }, 5000);
+        else _autoMapState[path] = "done";
+    });
+}
+
+// Renomeia a sequência principal do template ("SIGLA 00") pro nome do projeto
+// (ex. "MT 100"). Assim o JSON salva com o nome certo sem você renomear na mão.
+// Retry no cold-start (nome do .prproj vem vazio na 1ª chamada após abrir).
+var _seqRenameState = {}; // path -> "done"
+function _maybeRenameSequence(path) { if (_seqRenameState[path] !== "done") _attemptRenameSequence(path, 0); }
+function _attemptRenameSequence(path, tries) {
+    if (path !== _lastSeenProjectPath || _seqRenameState[path] === "done") return;
+    cs.evalScript("getProjectDir()", function (raw) {
+        if (path !== _lastSeenProjectPath) return;
+        var prj = ""; try { prj = (JSON.parse(raw) || {}).prj || ""; } catch (e) {}
+        if (!prj) { if (tries < 12) setTimeout(function () { _attemptRenameSequence(path, tries + 1); }, 3000); return; } // cold-start
+        var m = prj.match(/([A-Za-z]+)\s*[-_ ]*(\d+)/);
+        if (!m) { _seqRenameState[path] = "done"; return; } // projeto não-convenção → não mexe
+        _seqRenameState[path] = "done";
+        var target = m[1].toUpperCase() + " " + m[2]; // ex. "MT 100" (preserva o número do prproj)
+        var esc = target.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        cs.evalScript('renameActiveSequenceToProject("' + esc + '")', function (r) {
+            try { var d = JSON.parse(r); if (d && d.renamed) log("Sequência renomeada: '" + d.from + "' → '" + d.to + "'.", "ok"); } catch (e) {}
+        });
+    });
 }
 
 function saveProjectData() {
@@ -3848,8 +4145,24 @@ function _callGemini(systemPrompt, userText, cb, _attempt) {
 function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done) {
     function finish() { if (typeof done === "function") done(); }
     var key = getGeminiKey(), products = getGeminiProducts();
+    // Fallback (lista vazia na UI): lê o nomes_dos_produtos.txt da PASTA do projeto.
+    // É a fonte em DISCO — sobrevive a reload/troca de sessão (o localStorage não).
+    if (!products && prjDir) {
+        try {
+            var _fs0 = tryNodeRequire('fs'), _pm0 = tryNodeRequire('path');
+            var _np = _pm0 ? _pm0.join(prjDir, "nomes_dos_produtos.txt") : "";
+            if (_fs0 && _np && _fs0.existsSync(_np)) {
+                products = _fs0.readFileSync(_np, "utf8").replace(/^﻿/, "").replace(/\s+$/, "");
+                if (products) {
+                    var _el0 = document.getElementById("gemini-products");
+                    if (_el0) { _el0.value = products; try { localStorage.setItem(_geminiProductsKey(), products); } catch (e) {} }
+                    log("Lista de produtos lida de nomes_dos_produtos.txt (pasta do projeto).", "ok");
+                }
+            }
+        } catch (e) {}
+    }
     if (!key) { log("Sem *_autoeditor.json e sem chave do Gemini — configure a chave na seção 🤖 pra gerar automaticamente.", "warn"); finish(); return; }
-    if (!products) { log("Sem *_autoeditor.json — cole a lista de produtos na seção 🤖 pra eu gerar com o Gemini.", "warn"); finish(); return; }
+    if (!products) { log("Sem *_autoeditor.json e sem lista de produtos — cole a lista na seção 🤖, ou ponha um nomes_dos_produtos.txt na pasta do projeto.", "warn"); finish(); return; }
 
     var systemPrompt = readAgentPrompt();
     if (!systemPrompt) { log("Não achei o AGENT_PROMPT.md na extensão — não dá pra gerar com o Gemini.", "error"); finish(); return; }
@@ -6060,15 +6373,21 @@ function doMount(mountData, btn) {
     try { _fillVideoDimsForMount(mountData); } catch (e) {}
     var jsonStr = JSON.stringify(mountData).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     cs.evalScript('mountFromJSON("' + jsonStr + '")', function (raw) {
-        btn.disabled    = false;
-        btn.textContent = "Montar Vídeo";
+        // Só re-habilita o botão QUANDO tudo (inclusive a música de fundo) terminar.
+        var _mountDone = false;
+        function finishMount() { if (_mountDone) return; _mountDone = true; btn.disabled = false; btn.textContent = "Montar Vídeo"; }
         try {
             var result = JSON.parse(raw);
             if (result.error) {
                 log("Erro na montagem: " + result.error, "error");
-                return;
+                finishMount(); return;
             }
             log("Montagem concluída — " + result.total + " item(s), " + result.errors + " erro(s).", result.errors > 0 ? "warn" : "ok");
+
+            // Música de fundo (por sigla): gera a trilha em loop no volume salvo e insere.
+            // O botão só libera quando isto terminar (done → finishMount).
+            btn.textContent = "Finalizando (música)…";
+            try { _insertBackgroundMusic(finishMount); } catch (eBgm) { finishMount(); }
 
             // Esticamento do PRECO (fecha buracos pós-preço)
             if (result.precoStretchLog && result.precoStretchLog.length) {
@@ -6147,6 +6466,7 @@ function doMount(mountData, btn) {
             });
         } catch (e) {
             log("Erro inesperado: " + e.message, "error");
+            finishMount(); // garante liberar o botão mesmo em falha antes da música
         }
 
         // ── POST-MOUNT: Aplica preset de zoom se ativado ─────────────────────

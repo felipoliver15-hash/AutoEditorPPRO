@@ -80,6 +80,20 @@
       </div>
     </div>
 
+    <!-- Música de fundo — caminho + volume salvos POR SIGLA (ex. todo projeto "GT"
+         usa a mesma). Na montagem, entra em loop cobrindo o vídeo, no volume dado. -->
+    <div class="section">
+      <label>Música de fundo <span id="bgm-sigla" style="color:#9ad;font-weight:normal"></span></label>
+      <div class="row-space">
+        <input type="text" id="bgm-path" class="flex1" placeholder="nenhuma música — clique em Procurar" readonly style="min-width:0">
+        <input type="number" id="bgm-volume" min="0" max="100" step="1" value="15" title="Volume da música (%)" style="width:52px;padding:5px 4px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px;text-align:center">
+        <span style="color:#888;font-size:11px">%</span>
+        <button id="btn-browse-bgm" class="btn-browse">Procurar</button>
+        <button id="btn-clear-bgm" class="btn-icon" title="Limpar">✕</button>
+      </div>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Salva por sigla do projeto. Na montagem, entra numa faixa de áudio em loop até cobrir o vídeo, no volume escolhido (padrão 15%).</div>
+    </div>
+
     <div class="section">
       <button id="btn-mount" class="btn-primary" disabled>Montar Vídeo</button>
     </div>
@@ -271,6 +285,17 @@
         Clique pra criar (vazias, você desenha o conteúdo depois).
       </p>
       <button id="btn-create-templates">Criar Sequências Faltantes</button>
+    </div>
+
+    <div class="section">
+      <label>Projeto (manual)</label>
+      <p class="hint">
+        Só use se o Premiere não estiver devolvendo a pasta do projeto. Cole o caminho
+        completo do <b>.prproj</b> — a pasta e o nome saem dele.
+      </p>
+      <input id="manual-prproj" type="text"
+             placeholder="D:\Edição\Canais\Melhores Tech\VIDEOS\108\MT 108.prproj">
+      <div id="manual-prproj-status" class="root-folder-hint">usando o projeto aberto no Premiere</div>
     </div>
 
     <div class="section grow">

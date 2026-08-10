@@ -1,3 +1,176 @@
+// \u2500\u2500\u2500 JSON embutido \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// O ExtendScript (ES3) nao tem JSON nativo: ele vem do ambiente da Adobe. Se esse
+// componente sumir, TODA funcao deste host quebra ("JSON is undefined") e o painel
+// so mostra "EvalScript error." \u2014 foi exatamente o que aconteceu em 09/08/2026.
+// Este polyfill (json2, de Douglas Crockford, dominio publico) so entra em acao se
+// o JSON nativo nao existir, entao nao muda nada quando o ambiente esta sadio.
+if (typeof JSON !== "object") { JSON = {}; }
+(function () {
+    "use strict";
+
+    function f(n) { return n < 10 ? "0" + n : n; }
+
+    function this_value() { return this.valueOf(); }
+
+    if (typeof Date.prototype.toJSON !== "function") {
+        Date.prototype.toJSON = function () {
+            return isFinite(this.valueOf())
+                ? this.getUTCFullYear() + "-" +
+                  f(this.getUTCMonth() + 1) + "-" +
+                  f(this.getUTCDate()) + "T" +
+                  f(this.getUTCHours()) + ":" +
+                  f(this.getUTCMinutes()) + ":" +
+                  f(this.getUTCSeconds()) + "Z"
+                : null;
+        };
+        if (typeof String.prototype.toJSON !== "function")  { String.prototype.toJSON  = this_value; }
+        if (typeof Number.prototype.toJSON !== "function")  { Number.prototype.toJSON  = this_value; }
+        if (typeof Boolean.prototype.toJSON !== "function") { Boolean.prototype.toJSON = this_value; }
+    }
+
+    var rx_escapable = /[\\\"\u0000-\u001f\u007f-\u009f\u00ad\u0600-\u0604\u070f\u17b4\u17b5\u200c-\u200f\u2028-\u202f\u2060-\u206f\ufeff\ufff0-\uffff]/g;
+    var rx_dangerous = /[\u0000\u00ad\u0600-\u0604\u070f\u17b4\u17b5\u200c-\u200f\u2028-\u202f\u2060-\u206f\ufeff\ufff0-\uffff]/g;
+    var rx_one       = /^[\],:{}\s]*$/;
+    var rx_two       = /\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4})/g;
+    var rx_three     = /"[^"\\\n\r]*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?/g;
+    var rx_four      = /(?:^|:|,)(?:\s*\[)+/g;
+
+    var gap;
+    var indent;
+    var meta = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", "\"": "\\\"", "\\": "\\\\" };
+    var rep;
+
+    function quote(string) {
+        rx_escapable.lastIndex = 0;
+        return rx_escapable.test(string)
+            ? "\"" + string.replace(rx_escapable, function (a) {
+                  var c = meta[a];
+                  return typeof c === "string"
+                      ? c
+                      : "\\u" + ("0000" + a.charCodeAt(0).toString(16)).slice(-4);
+              }) + "\""
+            : "\"" + string + "\"";
+    }
+
+    function str(key, holder) {
+        var i, k, v, length, mind = gap, partial;
+        var value = holder[key];
+
+        if (value && typeof value === "object" && typeof value.toJSON === "function") {
+            value = value.toJSON(key);
+        }
+        if (typeof rep === "function") { value = rep.call(holder, key, value); }
+
+        switch (typeof value) {
+        case "string":
+            return quote(value);
+        case "number":
+            return isFinite(value) ? String(value) : "null";
+        case "boolean":
+        case "null":
+            return String(value);
+        case "object":
+            if (!value) { return "null"; }
+            gap += indent;
+            partial = [];
+            if (Object.prototype.toString.apply(value) === "[object Array]") {
+                length = value.length;
+                for (i = 0; i < length; i += 1) {
+                    partial[i] = str(i, value) || "null";
+                }
+                v = partial.length === 0
+                    ? "[]"
+                    : gap
+                        ? "[\n" + gap + partial.join(",\n" + gap) + "\n" + mind + "]"
+                        : "[" + partial.join(",") + "]";
+                gap = mind;
+                return v;
+            }
+            if (rep && typeof rep === "object") {
+                length = rep.length;
+                for (i = 0; i < length; i += 1) {
+                    if (typeof rep[i] === "string") {
+                        k = rep[i];
+                        v = str(k, value);
+                        if (v) { partial.push(quote(k) + (gap ? ": " : ":") + v); }
+                    }
+                }
+            } else {
+                for (k in value) {
+                    if (Object.prototype.hasOwnProperty.call(value, k)) {
+                        v = str(k, value);
+                        if (v) { partial.push(quote(k) + (gap ? ": " : ":") + v); }
+                    }
+                }
+            }
+            v = partial.length === 0
+                ? "{}"
+                : gap
+                    ? "{\n" + gap + partial.join(",\n" + gap) + "\n" + mind + "}"
+                    : "{" + partial.join(",") + "}";
+            gap = mind;
+            return v;
+        }
+    }
+
+    if (typeof JSON.stringify !== "function") {
+        JSON.stringify = function (value, replacer, space) {
+            var i;
+            gap = "";
+            indent = "";
+            if (typeof space === "number") {
+                for (i = 0; i < space; i += 1) { indent += " "; }
+            } else if (typeof space === "string") {
+                indent = space;
+            }
+            rep = replacer;
+            if (replacer && typeof replacer !== "function" &&
+                    (typeof replacer !== "object" || typeof replacer.length !== "number")) {
+                throw new Error("JSON.stringify");
+            }
+            return str("", { "": value });
+        };
+    }
+
+    if (typeof JSON.parse !== "function") {
+        JSON.parse = function (text, reviver) {
+            var j;
+
+            function walk(holder, key) {
+                var k, v, value = holder[key];
+                if (value && typeof value === "object") {
+                    for (k in value) {
+                        if (Object.prototype.hasOwnProperty.call(value, k)) {
+                            v = walk(value, k);
+                            if (v !== undefined) { value[k] = v; }
+                            else { delete value[k]; }
+                        }
+                    }
+                }
+                return reviver.call(holder, key, value);
+            }
+
+            text = String(text);
+            rx_dangerous.lastIndex = 0;
+            if (rx_dangerous.test(text)) {
+                text = text.replace(rx_dangerous, function (a) {
+                    return "\\u" + ("0000" + a.charCodeAt(0).toString(16)).slice(-4);
+                });
+            }
+
+            if (rx_one.test(
+                    text.replace(rx_two, "@").replace(rx_three, "]").replace(rx_four, "")
+                )) {
+                j = eval("(" + text + ")");
+                return typeof reviver === "function" ? walk({ "": j }, "") : j;
+            }
+
+            throw new SyntaxError("JSON.parse");
+        };
+    }
+}());
+// \u2500\u2500\u2500 fim do JSON embutido \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
 // Auto Editor - ExtendScript Host
 // Premiere Pro 2025
 
@@ -6010,4 +6183,84 @@ function mountFromJSON(jsonString) {
     } catch (e) {
         return JSON.stringify({ error: e.message });
     }
+}
+
+// ─── MÚSICA DE FUNDO ──────────────────────────────────────────────────────────
+
+// Diálogo nativo pra escolher UM arquivo de áudio (música de fundo).
+function selectAudioFile() {
+    try {
+        var filter;
+        if ($.os.indexOf("Windows") >= 0) filter = "Áudio:*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.wma,Todos:*.*";
+        else filter = function (f) { return true; };
+        var sel = File.openDialog("Escolha a música de fundo", filter, false);
+        if (!sel) return JSON.stringify({ cancelled: true });
+        return JSON.stringify({ path: sel.fsName });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
+}
+
+// Duração da sequência ativa em segundos (maior end entre vídeo e áudio).
+function getSequenceDuration() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ dur: 0 });
+        var maxTicks = 0;
+        try { var e = parseFloat(seq.end); if (!isNaN(e) && e > maxTicks) maxTicks = e; } catch (eS) {}
+        // Fallback/robustez: varre clips e pega o maior end.
+        function scan(tracks) {
+            for (var t = 0; t < tracks.numTracks; t++) {
+                var tr = tracks[t];
+                for (var c = 0; c < tr.clips.numItems; c++) {
+                    try { var ce = parseFloat(tr.clips[c].end.ticks); if (ce > maxTicks) maxTicks = ce; } catch (eC) {}
+                }
+            }
+        }
+        try { scan(seq.videoTracks); } catch (eV) {}
+        try { scan(seq.audioTracks); } catch (eA) {}
+        return JSON.stringify({ dur: maxTicks / TICKS_PER_SECOND });
+    } catch (e) { return JSON.stringify({ dur: 0, error: e.message }); }
+}
+
+// Insere a música de fundo numa faixa de áudio VAZIA (sem clips) pra NÃO
+// sobrescrever narração/efeitos. Se não houver faixa vazia, cria uma nova (QE).
+function insertBackgroundMusicHost(filePath, startSec) {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ error: "Nenhuma sequência ativa." });
+        var item = importAndGet(filePath);
+        if (!item) return JSON.stringify({ error: "Falha ao importar: " + filePath });
+        var t = new Time(); t.ticks = toTicks(startSec || 0);
+
+        // 1) Acha a 1ª faixa de áudio VAZIA (sem nenhum clip).
+        function findEmpty() {
+            for (var i = 0; i < seq.audioTracks.numTracks; i++) {
+                try { if (seq.audioTracks[i].clips.numItems === 0) return i; } catch (e) {}
+            }
+            return -1;
+        }
+        var idx = findEmpty();
+
+        // 2) Sem faixa vazia → cria uma nova de áudio no fim (QE) e re-procura.
+        if (idx < 0) {
+            try {
+                app.enableQE();
+                var qeSeq = qe.project.getActiveSequence();
+                if (qeSeq && typeof qeSeq.addTracks === "function") {
+                    // addTracks(numVideo, videoPos, numAudio, audioPos)
+                    try { qeSeq.addTracks(0, 0, 1, seq.audioTracks.numTracks); }
+                    catch (e1) { try { qeSeq.addTracks(0, 1); } catch (e2) {} }
+                }
+            } catch (eQ) {}
+            idx = findEmpty();
+        }
+        // 3) Ainda sem faixa vazia → NÃO sobrescreve; avisa.
+        if (idx < 0) return JSON.stringify({ error: "sem faixa de áudio vazia (nem consegui criar) — música não inserida pra não sobrescrever." });
+
+        var track = seq.audioTracks[idx];
+        var placed = false;
+        try { track.overwriteClip(item, t); placed = true; } catch (eO) {}
+        if (!placed) { try { track.insertClip(item, t); placed = true; } catch (eI) {} }
+        if (!placed) return JSON.stringify({ error: "overwriteClip/insertClip falharam na faixa vazia A" + (idx + 1) + "." });
+        return JSON.stringify({ success: true, track: "A" + (idx + 1) });
+    } catch (e) { return JSON.stringify({ error: e.message }); }
 }
