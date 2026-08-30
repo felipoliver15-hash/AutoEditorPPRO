@@ -6264,3 +6264,49 @@ function insertBackgroundMusicHost(filePath, startSec) {
         return JSON.stringify({ success: true, track: "A" + (idx + 1) });
     } catch (e) { return JSON.stringify({ error: e.message }); }
 }
+
+// ─── RENOMEAR A SEQUÊNCIA ─────────────────────────────────────────────────────
+
+// Renomeia a sequência ATIVA pro nome do projeto (ex. template "MT 00" → "MT 108").
+// O painel só chama isso em projeto de convenção (SIGLA + NÚMERO).
+//
+// TRAVA: só renomeia se o nome ATUAL também for SIGLA + NÚMERO puro ("MT 00",
+// "ET-1"). Qualquer outro nome ("Entrevista final", "MT 108 - v2") fica intacto —
+// assim não há risco de estragar uma sequência que você nomeou à mão.
+//
+// Histórico: esta função ficou desativada por um tempo porque suspeitei que
+// `seq.name = ...` derrubava a engine do ExtendScript. Era falso alarme — a causa
+// real era o objeto JSON ter sumido do ambiente (veja o polyfill no topo do host).
+function renameActiveSequenceToProject(target) {
+    try {
+        target = String(target || "");
+        if (!target) return JSON.stringify({ renamed: false, reason: "alvo vazio" });
+
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ renamed: false, reason: "nenhuma sequência ativa" });
+
+        var atual = String(seq.name || "");
+        if (atual === target) {
+            return JSON.stringify({ renamed: false, reason: "já está com esse nome", from: atual, to: target });
+        }
+
+        var conv = /^\s*[A-Za-z]+\s*[-_ ]*\d+\s*$/;
+        if (!conv.test(atual)) {
+            return JSON.stringify({ renamed: false, reason: "nome fora da convenção — não mexi", from: atual, to: target });
+        }
+
+        seq.name = target;
+
+        // Confirma lendo de volta (o Premiere pode recusar em silêncio).
+        var agora = atual;
+        try { agora = String(app.project.activeSequence.name || ""); } catch (eR) {}
+        if (agora !== target) {
+            return JSON.stringify({ renamed: false, reason: "o Premiere não aplicou", from: atual, to: target, atual: agora });
+        }
+
+        try { app.project.save(); } catch (eS) {}
+        return JSON.stringify({ renamed: true, from: atual, to: target });
+    } catch (e) {
+        return JSON.stringify({ renamed: false, error: e.message });
+    }
+}

@@ -45,23 +45,58 @@ cs.evalScript = function (script, callback) {
 };
 
 // Liga o campo do painel ao armazenamento (salva enquanto digita).
+// Mostra o que o Premiere está devolvendo (automático) e só destaca o manual
+// quando ele realmente for necessário. O host SEMPRE tem prioridade.
+var _aeRefreshProjStatus = function () {};   // preenchido no setup do painel
+
 function _aeSetupManualProject() {
     var inp = document.getElementById("manual-prproj");
     var st  = document.getElementById("manual-prproj-status");
     if (!inp) return;
+
+    var tentativas = 0;
     var pinta = function () {
-        var man = _aeManualProject();
         if (!st) return;
-        st.textContent = man
-            ? ("manual ativo: " + man.prj + "  —  " + man.dir)
-            : "usando o projeto aberto no Premiere";
-        st.style.color = man ? "#5fbf5f" : "";
+        var man = _aeManualProject();
+        // Pergunta ao host, sem passar pelo fallback manual.
+        _aeEvalRaw("getProjectDir()", function (raw) {
+            var auto = null;
+            try {
+                var p = JSON.parse(raw);
+                if (p && p.dir && p.prj) auto = p;
+            } catch (e) {}
+
+            var box = document.getElementById("manual-prproj-box");
+            if (auto) {
+                // Detectou sozinho: esconde o campo manual, deixa só a confirmação.
+                if (box) box.style.display = "none";
+                st.textContent = "✓ " + auto.prj + "  —  " + auto.dir;
+                st.style.color = "#5fbf5f";
+                return;
+            }
+            // Cold-start: o Premiere às vezes demora pra responder logo que o
+            // painel abre. Re-tenta antes de expor o campo manual.
+            if (!man && tentativas < 5) { tentativas++; setTimeout(pinta, 2000); return; }
+            if (box) box.style.display = "";
+            if (man) {
+                st.textContent = "o Premiere não respondeu — usando o manual: " + man.prj + "  —  " + man.dir;
+                st.style.color = "#d8a657";
+                return;
+            }
+            var txt = (inp.value || "").replace(/^\s+|\s+$/g, "");
+            st.textContent = txt
+                ? "caminho inválido — precisa ser o arquivo .prproj completo"
+                : "o Premiere não respondeu (salve o projeto ou cole o .prproj aqui)";
+            st.style.color = txt ? "#e06c75" : "";
+        });
     };
+
     try { inp.value = localStorage.getItem("ae_manual_prproj") || ""; } catch (e) {}
     inp.addEventListener("input", function () {
         try { localStorage.setItem("ae_manual_prproj", inp.value || ""); } catch (e2) {}
         pinta();
     });
+    _aeRefreshProjStatus = function () { tentativas = 0; pinta(); };
     pinta();
 }
 
@@ -265,6 +300,34 @@ function fmtTimestamp(sec) {
 }
 
 // Preenche a aba Capítulos com linhas editáveis (nome + benefício).
+// Lê o tema/título do vídeo de "video_tema.txt" (primeira linha não vazia).
+// Procura na pasta do .prproj e, se não achar, em AutoEditor_Downloads — assim
+// funciona tanto criando o arquivo à mão quanto se ele vier junto do Drive.
+function _lerVideoTema() {
+    try {
+        var fsT = tryNodeRequire('fs'), pmT = tryNodeRequire('path');
+        if (!fsT || !pmT || !_lastSeenProjectPath) return "";
+        var dir = String(_lastSeenProjectPath).replace(/[\\\/][^\\\/]*$/, "");
+        if (!dir) return "";
+        var candidatos = [
+            pmT.join(dir, "video_tema.txt"),
+            pmT.join(dir, "AutoEditor_Downloads", "video_tema.txt")
+        ];
+        for (var i = 0; i < candidatos.length; i++) {
+            try {
+                if (!fsT.existsSync(candidatos[i])) continue;
+                var txt = String(fsT.readFileSync(candidatos[i], "utf8")).replace(/^\uFEFF/, "");
+                var linhas = txt.split(/\r?\n/);
+                for (var j = 0; j < linhas.length; j++) {
+                    var l = linhas[j].replace(/^\s+|\s+$/g, "");
+                    if (l) return l;
+                }
+            } catch (eF) {}
+        }
+    } catch (e) {}
+    return "";
+}
+
 function renderChapters(chapters) {
     var container = document.getElementById("chapters-list");
     if (!container || !chapters || !chapters.length) return;
@@ -277,12 +340,24 @@ function renderChapters(chapters) {
     hdr.innerHTML = "<span>tempo</span><span>nome</span><span>benefício (editável)</span>";
     container.appendChild(hdr);
 
-    chapters.forEach(function (c) {
+    var temaVideo = _lerVideoTema();
+
+    chapters.forEach(function (c, idx) {
         var ts = fmtTimestamp(c.time);
         var timeKey = ts; // chave para localStorage
 
-        // Benefício: prioridade → marcador.comments → localStorage salvo → ""
-        var savedTag = savedTags[timeKey] !== undefined ? savedTags[timeKey] : (c.tag || "");
+        // Benefício: prioridade → localStorage salvo → marcador.comments → ""
+        var temSalvo = savedTags[timeKey] !== undefined;
+        var savedTag = temSalvo ? savedTags[timeKey] : (c.tag || "");
+
+        // Introdução (1ª linha, que vem sempre em branco): preenche com o tema do
+        // vídeo. Só quando ainda não há nada salvo — se você apagar depois, fica
+        // apagado, e o que você digitar nunca é sobrescrito.
+        var ehIntro = (idx === 0 && c.time < 1) || /introdu/i.test(String(c.title || ""));
+        if (!temSalvo && !savedTag && temaVideo && ehIntro) {
+            savedTag = temaVideo;
+            _saveChapterTag(timeKey, savedTag);
+        }
 
         var row = document.createElement("div");
         row.className = "chap-row";
@@ -674,7 +749,8 @@ function initRecursos() {
     // Toggle "importar ao abrir o projeto" (global, off por padrão).
     var driveAutoChk = document.getElementById("drive-auto-open");
     if (driveAutoChk) {
-        try { driveAutoChk.checked = (localStorage.getItem(DRIVE_AUTO_STORAGE) === "1"); } catch (e) {}
+        // Ligado por padrão: só fica desligado se o usuário desmarcar ("0").
+        try { driveAutoChk.checked = (localStorage.getItem(DRIVE_AUTO_STORAGE) !== "0"); } catch (e) {}
         driveAutoChk.addEventListener("change", function () {
             try { localStorage.setItem(DRIVE_AUTO_STORAGE, driveAutoChk.checked ? "1" : "0"); } catch (e) {}
         });
@@ -1752,46 +1828,93 @@ function _insertBackgroundMusic(done) {
 // Cache (por sessão) dos canais = subpastas da raiz. Evita re-listar a raiz a
 // cada importação. _driveResetChannelCache() limpa (ex. botão "atualizar").
 var _driveChannelCache = null;
+var _driveVistosUltimaBusca = [];   // pastas vistas na última busca (diagnóstico)
 function _driveResetChannelCache() { _driveChannelCache = null; }
 
 // Acha a pasta do PROJETO dentro da raiz, casando a chave normalizada (ex "AT5")
 // contra as subpastas de cada canal. Para no 1º match (sigla é única por canal).
 // cb(err, { id, name, channel } | null).
-function _driveFindProjectFolder(apiKey, rootId, key, cb) {
-    function searchChannels(channels, allowRefresh) {
-        var ci = 0;
-        (function nextChannel() {
-            if (ci >= channels.length) {
-                // Varreu tudo sem achar. Se estava no cache, re-lista a raiz (pode ter
-                // canal/projeto NOVO criado nesta sessão) e tenta 1x mais.
-                if (allowRefresh) { _driveChannelCache = null; loadAndSearch(false); return; }
-                cb(null, null); return;
+// Procura a pasta do projeto (chave SIGLA+NÚMERO) a partir da raiz.
+// Antes só olhava raiz → canal → projeto (2 níveis), então canais com uma pasta
+// intermediária (ex. "VIDEOS") nunca eram encontrados e só o ID manual funcionava.
+// Agora desce até DRIVE_MAX_DEPTH níveis, com parada assim que acha.
+// Guarda os nomes vistos pra explicar a falha em vez de só dizer "não achei".
+var DRIVE_MAX_DEPTH = 3;
+
+// A pasta se chama só pelo número do projeto? Aceita "16" e "16 - Nome", mas
+// recusa "116" e "160" (compara o número inteiro, não o prefixo do texto).
+function _driveNomeEhNumero(nome, num) {
+    if (!num) return false;
+    var s = String(nome == null ? "" : nome).replace(/^\s+/, "");
+    var m = s.match(/^(\d+)/);
+    if (!m) return false;
+    if (parseInt(m[1], 10) !== parseInt(num, 10)) return false;
+    var resto = s.substring(m[1].length);
+    return resto === "" || !/^\d/.test(resto);
+}
+
+function _driveFindProjectFolder(apiKey, rootId, key, num, cb) {
+    var vistos     = [];
+    var porNumero  = [];   // candidatos "16", "16 - Nome"
+    if (num == null) num = (String(key).match(/(\d+)$/) || [])[1];
+
+    function varre(folderId, caminho, depth, done) {
+        _driveList(apiKey, folderId, function (err, files) {
+            if (err) {
+                recLog("Drive: erro listando '" + caminho + "': " + err.message, "warn");
+                done(null); return;
             }
-            var ch = channels[ci++];
-            _driveList(apiKey, ch.id, function (err, files) {
-                if (err) { recLog("Drive: erro listando canal '" + ch.name + "': " + err.message, "warn"); nextChannel(); return; }
-                for (var i = 0; i < files.length; i++) {
-                    var f = files[i];
-                    if (f.mimeType !== "application/vnd.google-apps.folder") continue;
-                    if (_normProjectKey(f.name) === key) { cb(null, { id: f.id, name: f.name, channel: ch.name }); return; }
+            var subs = [];
+            for (var i = 0; i < files.length; i++) {
+                var f = files[i];
+                if (f.mimeType !== "application/vnd.google-apps.folder") continue;
+                if (key && _normProjectKey(f.name) === key) {
+                    done({ id: f.id, name: f.name, channel: caminho });
+                    return;
                 }
-                nextChannel();
-            });
-        })();
-    }
-    function loadAndSearch(allowRefresh) {
-        if (_driveChannelCache) { searchChannels(_driveChannelCache, allowRefresh); return; }
-        _driveList(apiKey, rootId, function (err, files) {
-            if (err) { cb(err); return; }
-            var channels = [];
-            files.forEach(function (f) {
-                if (f.mimeType === "application/vnd.google-apps.folder") channels.push({ id: f.id, name: f.name });
-            });
-            _driveChannelCache = channels;
-            searchChannels(channels, false); // lista fresca → não re-atualiza de novo
+                // Pasta nomeada só pelo número (ex. "16", "16 - Óculos VR"): guarda
+                // como candidato e só usa se a busca estrita não achar nada.
+                if (_driveNomeEhNumero(f.name, num)) {
+                    porNumero.push({ id: f.id, name: f.name, channel: caminho });
+                }
+                subs.push(f);
+                if (vistos.length < 60) vistos.push(caminho + "/" + f.name);
+            }
+            if (depth >= DRIVE_MAX_DEPTH || !subs.length) { done(null); return; }
+            var si = 0;
+            (function proxima() {
+                if (si >= subs.length) { done(null); return; }
+                var s = subs[si++];
+                varre(s.id, caminho + "/" + s.name, depth + 1, function (r) {
+                    if (r) done(r); else proxima();
+                });
+            })();
         });
     }
-    loadAndSearch(true); // usa cache se houver; se não achar, re-lista a raiz 1x
+
+    function tenta(allowRefresh) {
+        vistos = []; porNumero = [];
+        varre(rootId, "raiz", 1, function (achou) {
+            if (achou) { cb(null, achou); return; }
+
+            // 2ª tentativa: pasta só com o número. Exige candidato ÚNICO pra não
+            // pegar o projeto errado de outro canal.
+            if (porNumero.length === 1) {
+                recLog("Drive: casou pelo número (" + num + ") em " + porNumero[0].channel + "/" + porNumero[0].name, "ok");
+                cb(null, porNumero[0]); return;
+            }
+            if (porNumero.length > 1) {
+                var nomes = [];
+                for (var i = 0; i < porNumero.length && i < 6; i++) nomes.push(porNumero[i].channel + "/" + porNumero[i].name);
+                recLog("Drive: " + porNumero.length + " pastas com o número " + num + " — ambíguo, use o ID manual. (" + nomes.join(", ") + ")", "warn");
+            }
+
+            if (allowRefresh) { _driveChannelCache = null; tenta(false); return; }
+            _driveVistosUltimaBusca = vistos;
+            cb(null, null);
+        });
+    }
+    tenta(true);
 }
 
 // Importa a pasta do projeto ATUAL: resolve sigla+número pelo nome do .prproj,
@@ -1813,11 +1936,20 @@ function importFromProjectName(renderCb, silent, onResult) {
         // abrir o painel. Não é erro — sinaliza "notready" pro auto re-tentar.
         if (!prj) { if (!silent) recLog("Drive: salve o projeto primeiro (preciso do nome do .prproj). [DIAG getProjectDir: " + String(rawPrj).slice(0, 180) + "]", "warn"); onResult("notready"); return; }
         var key = _normProjectKey(prj);
-        if (!key) { recLog("Drive: nome '" + prj + "' sem padrão SIGLA+NÚMERO — use o ID manual.", "warn"); onResult("error"); return; }
-        recLog("Drive: procurando a pasta do projeto '" + prj + "' (chave " + key + ") na raiz…");
-        _driveFindProjectFolder(apiKey, rootId, key, function (err, found) {
+        // Projetos sem sigla (ex. "01.prproj") não geram chave — nesse caso a busca
+        // usa só o número, exigindo candidato único pra não pegar outro canal.
+        var num = (String(prj).match(/(\d+)/) || [])[1] || null;
+        if (!key && !num) { recLog("Drive: nome '" + prj + "' não tem sigla nem número — use o ID manual.", "warn"); onResult("error"); return; }
+        recLog("Drive: procurando a pasta do projeto '" + prj + "' (" + (key ? "chave " + key : "número " + num) + ") na raiz…");
+        _driveFindProjectFolder(apiKey, rootId, key, num, function (err, found) {
             if (err) { recLog("✗ Drive: " + err.message, "err"); onResult("error"); return; }
-            if (!found) { recLog("✗ Drive: não achei pasta '" + key + "' em nenhum canal da raiz. Confira o nome do .prproj ou use o ID manual.", "warn"); onResult("notfound"); return; }
+            if (!found) {
+                var amostra = (_driveVistosUltimaBusca || []).slice(0, 12).join(", ");
+                recLog("✗ Drive: não achei pasta com a chave '" + key + "' (projeto '" + prj + "') até " + DRIVE_MAX_DEPTH + " níveis abaixo da raiz.", "warn");
+                if (amostra) recLog("   pastas vistas: " + amostra + ((_driveVistosUltimaBusca.length > 12) ? " … (+" + (_driveVistosUltimaBusca.length - 12) + ")" : ""), "warn");
+                else recLog("   nenhuma subpasta encontrada na raiz — confira o ID da raiz e o compartilhamento.", "warn");
+                onResult("notfound"); return;
+            }
             recLog("✓ Drive: encontrado " + found.channel + " / " + found.name + " — importando…", "ok");
             importProductsFromDrive(apiKey, found.id, renderCb);
             onResult("ok");
@@ -2303,6 +2435,42 @@ function _withProjectDir(cb, tries) {
     });
 }
 
+// Se houver um "video_tema.txt" SOLTO na pasta-mãe do Drive, baixa pra pasta do
+// projeto. É o título/tema do vídeo, usado pra preencher o benefício da linha
+// "Introdução" na aba Capítulos (veja _lerVideoTema).
+function _driveFetchVideoTema(apiKey, children, prjDir) {
+    if (!prjDir) return;
+    var f = null;
+    for (var i = 0; i < children.length; i++) {
+        var c = children[i];
+        if (c.mimeType === "application/vnd.google-apps.folder") continue;
+        if (/^video_tema\.txt$/i.test(String(c.name || "").replace(/^\s+|\s+$/g, ""))) { f = c; break; }
+    }
+    if (!f) return;
+    var url = "https://www.googleapis.com/drive/v3/files/" + f.id +
+              "?alt=media&supportsAllDrives=true&key=" + encodeURIComponent(apiKey);
+    _httpsGet(url, true, function (err, buf) {
+        if (err) { recLog("Drive: achei video_tema.txt mas não baixei: " + err.message, "warn"); return; }
+        var txt = "";
+        try { txt = buf.toString("utf8"); } catch (e) { txt = String(buf || ""); }
+        txt = txt.replace(/^\uFEFF/, "").replace(/\s+$/, "");
+        try {
+            var _fsT = tryNodeRequire('fs'), _pmT = tryNodeRequire('path');
+            if (_fsT && _pmT) _fsT.writeFileSync(_pmT.join(prjDir, "video_tema.txt"), txt, "utf8");
+        } catch (eW) {
+            recLog("Drive: video_tema.txt baixado mas não consegui salvar: " + eW.message, "warn");
+            return;
+        }
+        var primeira = "";
+        var linhas = txt.split(/\r?\n/);
+        for (var j = 0; j < linhas.length; j++) {
+            var l = linhas[j].replace(/^\s+|\s+$/g, "");
+            if (l) { primeira = l; break; }
+        }
+        recLog("Drive: video_tema.txt salvo → tema do vídeo: \"" + primeira + "\"", "ok");
+    });
+}
+
 function importProductsFromDrive(apiKey, folderInput, renderCb) {
     var fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
     if (!fs || !pmod) { recLog("Node indisponível.", "err"); return; }
@@ -2319,6 +2487,7 @@ function importProductsFromDrive(apiKey, folderInput, renderCb) {
             if (err) { recLog("✗ Drive: " + err.message + " (a pasta está compartilhada por link? a API key tem a Drive API ativada?)", "err"); _driveImportRunning = false; _driveAwaitingDrain = false; return; }
             // Preenche a lista do Gemini se houver nomes_dos_produtos.txt solto na pasta-mãe.
             _driveFillProductNames(apiKey, children, prjDir);
+            _driveFetchVideoTema(apiKey, children, prjDir);
             var subs = [];
             children.forEach(function (c) {
                 if (c.mimeType !== "application/vnd.google-apps.folder") return;
@@ -3713,6 +3882,7 @@ function _watchProjectChanges() {
 
             // (1) Atualiza a chave do projeto + restaura estado por-projeto.
             _projectKey = "autoeditor_" + path;
+            try { _aeRefreshProjStatus(); } catch (eRS) {}
             try { restoreProjectPaths(); } catch (eR) {}
             try {
                 var gp = document.getElementById("gemini-products");
@@ -3721,16 +3891,16 @@ function _watchProjectChanges() {
             // Música de fundo por sigla (deriva o nome do projeto do caminho do .prproj).
             try { _bgmLoadForProject(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eBg) {}
 
-            // Rename da sequência DESLIGADO: `seq.name = ...` derruba a engine do
-            // ExtendScript em algumas versões do Premiere (crash nativo → todo
-            // evalScript vira "EvalScript error." até reiniciar o Premiere). Reativar
-            // só depois de achar um jeito seguro de renomear (QE ou método writable).
-            // try { _maybeRenameSequence(path); } catch (eRn) {}
+            // Renomeia a sequência do template pro nome do projeto ("MT 00" → "MT 108").
+            // Ficou desligado por um tempo porque suspeitei que `seq.name = ...` derrubava
+            // a engine do ExtendScript — era falso alarme: a causa real era o objeto JSON
+            // ter sumido do ambiente (o host agora leva o polyfill embutido).
+            try { _maybeRenameSequence(path); } catch (eRn) {}
 
             // (2) Auto-import (opt-in). Guardas: toggle on + raiz + 1x por sessão +
             // sem cards na tela (evita duplicar produtos já restaurados).
             var autoOn = false, hasRoot = false;
-            try { autoOn = (localStorage.getItem(DRIVE_AUTO_STORAGE) === "1"); } catch (e) {}
+            try { autoOn = (localStorage.getItem(DRIVE_AUTO_STORAGE) !== "0"); } catch (e) {}
             try { hasRoot = !!_driveExtractFolderId(localStorage.getItem(DRIVE_ROOT_STORAGE) || ""); } catch (e) {}
             var hasCards = false;
             try { var pc = document.getElementById("products-container"); hasCards = !!(pc && pc.children.length); } catch (e) {}

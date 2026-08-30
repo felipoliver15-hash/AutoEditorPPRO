@@ -17,15 +17,15 @@
   </div>
 
   <div class="tabs">
-    <button class="tab active" data-tab="montar">Montar</button>
+    <button class="tab active" data-tab="recursos">Recursos</button>
+    <button class="tab" data-tab="montar">Montar</button>
     <button class="tab" data-tab="ia" style="display:none">IA</button>
-    <button class="tab" data-tab="recursos">Recursos</button>
     <button class="tab" data-tab="capitulos">Capítulos</button>
     <button class="tab" data-tab="templates" style="display:none">Templates</button>
   </div>
 
   <!-- ── MONTAR ───────────────────────────────────────────── -->
-  <div id="tab-montar" class="tab-content active">
+  <div id="tab-montar" class="tab-content">
 
     <!-- Stock videos: oculto da UI (lógica mantida dormente — pontos-chave com
          stock_folder simplesmente pulam quando não há pasta configurada). -->
@@ -221,7 +221,7 @@
   </div>
 
   <!-- ── RECURSOS ─────────────────────────────────────────── -->
-  <div id="tab-recursos" class="tab-content">
+  <div id="tab-recursos" class="tab-content active">
 
     <div id="ytdlp-update-bar" class="section" style="display:none">
       <div class="row-space">
@@ -288,13 +288,15 @@
     </div>
 
     <div class="section">
+      <div id="manual-prproj-box" style="display:none">
       <label>Projeto (manual)</label>
       <p class="hint">
-        Só use se o Premiere não estiver devolvendo a pasta do projeto. Cole o caminho
-        completo do <b>.prproj</b> — a pasta e o nome saem dele.
+        Normalmente deixe <b>vazio</b>: a pasta é detectada sozinha pelo projeto aberto.
+        Preencha só se o Premiere não responder — cole o caminho completo do <b>.prproj</b>.
       </p>
       <input id="manual-prproj" type="text"
              placeholder="D:\Edição\Canais\Melhores Tech\VIDEOS\108\MT 108.prproj">
+      </div>
       <div id="manual-prproj-status" class="root-folder-hint">usando o projeto aberto no Premiere</div>
     </div>
 
