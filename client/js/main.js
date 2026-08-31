@@ -3194,7 +3194,8 @@ function initIA() {
     var zoomChk = document.getElementById("ia-apply-zoom-preset");
     if (zoomChk) {
         try {
-            zoomChk.checked = localStorage.getItem("autoeditor.applyZoomPreset") === "true";
+            // Ligado por padrão: só fica desligado se o usuário desmarcar.
+            zoomChk.checked = localStorage.getItem("autoeditor.applyZoomPreset") !== "false";
         } catch(e) {}
         zoomChk.addEventListener("change", function() {
             try { localStorage.setItem("autoeditor.applyZoomPreset", zoomChk.checked ? "true" : "false"); } catch(e) {}
@@ -6611,7 +6612,7 @@ function doMount(mountData, btn) {
                 // Log do scaleToFrame pros product_image (insertMediaAtTime retorna isso)
                 if ((r.type === "product_image" || r.type === "stock_image") && r.scaleToFrame) {
                     var sf = r.scaleToFrame;
-                    var msg = "scaleToFrame: " + sf.method + (sf.scale ? " (scale=" + sf.scale.toFixed(1) + "%)" : "");
+                    var msg = "scaleToFrame: " + sf.method + (sf.fit ? " " + sf.fit : "") + (sf.scale ? " (scale=" + sf.scale.toFixed(1) + "%)" : "");
                     if (r.animation) {
                         msg += " | anim=" + r.animation.type + " base=" + r.animation.baseScale;
                         if (r.animation.transformFound === false) msg += " NO-TRANSFORM";
@@ -6642,7 +6643,7 @@ function doMount(mountData, btn) {
         // ── POST-MOUNT: Aplica preset de zoom se ativado ─────────────────────
         // Coleta items com _zoomPreset, agrupa por preset name, chama applyPresetsFromBin
         var applyZoom = false;
-        try { applyZoom = localStorage.getItem("autoeditor.applyZoomPreset") === "true"; } catch(e) {}
+        try { applyZoom = localStorage.getItem("autoeditor.applyZoomPreset") !== "false"; } catch(e) {}
         if (applyZoom) {
             applyZoomPresetsAfterMount(mountData);
         }

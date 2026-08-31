@@ -21,14 +21,13 @@ echo [OK] Arquivos copiados.
 :: Habilita extensoes nao assinadas no Premiere (PlayerDebugMode)
 echo.
 echo Habilitando modo de extensoes de desenvolvimento...
-reg add "HKCU\Software\Adobe\CSXS.11" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
-reg add "HKCU\Software\Adobe\CSXS.12" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
+for %%V in (10 11 12 13) do reg add "HKCU\Software\Adobe\CSXS.%%V" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
 
-echo [OK] PlayerDebugMode ativado para CSXS 11 e 12.
+echo [OK] PlayerDebugMode ativado (CSXS 10 a 13).
 echo.
 echo ============================================================
 echo  PRONTO!
-echo  - Feche e reabra o Adobe Premiere Pro 2025
+echo  - Feche e reabra o Adobe Premiere Pro
 echo  - Va em: Janela > Extensoes > Auto Editor
 echo ============================================================
 echo.

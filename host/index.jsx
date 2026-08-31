@@ -2022,7 +2022,10 @@ function applyAnimation(clip, animationType, baseScaleHint) {
 // Retorna { ok, method, scale } pra log.
 function applyScaleToFrameSize(seq, track, startTimeTicks, hintSrcW, hintSrcH, fitMode) {
     var result = { ok: false, method: "none" };
-    var _fit = (fitMode === "fit");
+    // "auto" = decide pela proporção real, DEPOIS de descobrir srcW/srcH (que
+    // muitas vezes só vêm do XMP aqui dentro, não da dica do painel).
+    var _fitAuto = (fitMode === "auto");
+    var _fit = _fitAuto ? true : (fitMode === "fit");
 
     // ── Encontra o clip JS na track ────────────────────────────────────────
     // O Premiere faz snap pra frame boundary — o tick salvo pode diferir do que
@@ -2116,6 +2119,13 @@ function applyScaleToFrameSize(seq, track, startTimeTicks, hintSrcW, hintSrcH, f
         } catch(eDim) {}
 
         if (srcW > 0 && srcH > 0 && seqW > 0 && seqH > 0) {
+            // Mesmo critério do fundo borrado (applyBlurredBackgroundEffect):
+            // landscape (W >= H*1.2) NÃO ganha fundo borrado, porque se espera que
+            // PREENCHA o quadro — com "fit" ficava sobrando borda preta em volta.
+            // Vertical/quadrada (recorte de produto) cabe inteira e o fundo borrado
+            // preenche as laterais.
+            if (_fitAuto) _fit = !(srcW >= srcH * 1.2);
+            result.fit = _fit ? "fit" : "fill";
             var ratio;
             if (_fit) {
                 // FIT (cabe inteira no frame, nunca corta) = min ratio. Normaliza
@@ -2253,7 +2263,7 @@ function insertMediaAtTime(filePath, trackIndex, startSec, durationSec, animatio
 
         // 1. Aplica "Scale to Frame Size" PRIMEIRO — define a escala base.
         //    Imagem → "fit" (cabe inteira); vídeo → "fill" (cobre o frame).
-        var _fitMode = _AE_isImagePath(filePath) ? "fit" : "fill";
+        var _fitMode = _AE_isImagePath(filePath) ? "auto" : "fill";
         var sfRes = { method: "skipped" };
         try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH, _fitMode); } catch(eSF) { sfRes = { method: "err: " + eSF.message }; }
 
@@ -5301,7 +5311,7 @@ function insertBinClipAtTime(name, trackIndex, startSec, durationSec, srcW, srcH
 
         // Imagem de produto → "fit" (cabe inteira, normaliza qualquer resolução);
         // vídeo → "fill" (cobre o frame, como antes).
-        var _fitMode = _AE_isImagePath(itemPath || name) ? "fit" : "fill";
+        var _fitMode = _AE_isImagePath(itemPath || name) ? "auto" : "fill";
         var sfRes = null;
         try { sfRes = applyScaleToFrameSize(seq, track, startTime.ticks, srcW, srcH, _fitMode); } catch (eSF) {}
 

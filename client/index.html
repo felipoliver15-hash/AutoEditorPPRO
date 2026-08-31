@@ -150,9 +150,9 @@
       <p class="hint" id="ia-cycle-hint">≈ 35s por ciclo de imagens</p>
     </div>
 
-    <div class="section">
+    <div class="section" style="display:none">
       <label class="checkbox-row">
-        <input type="checkbox" id="ia-apply-zoom-preset">
+        <input type="checkbox" id="ia-apply-zoom-preset-legado">
         <span>Aplicar preset de zoom após mount (alterna ZOOMIN/ZOOMOUT)</span>
       </label>
       <p class="hint">
@@ -245,6 +245,15 @@
         <input type="checkbox" id="audio-auto"> Cortar automaticamente ao abrir o projeto
       </label>
       <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Procura o áudio na pasta do projeto e, se não houver, na pasta global <b>Music\AutoEditor</b>. Corta os silêncios (−45 dB / 0,30 s / margem 0,05 s) e insere o resultado na faixa A1. Se não houver áudio ainda, tenta de novo a cada 15 s.</div>
+    </div>
+
+    <!-- ── Zoom das imagens de auto-fill (preset copiado de [PRESET]ZOOMIN/OUT) ── -->
+    <div class="section">
+      <label>Imagens — zoom</label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-top:6px;cursor:pointer">
+        <input type="checkbox" id="ia-apply-zoom-preset"> Aplicar zoom nas imagens após montar (alterna ZOOMIN/ZOOMOUT)
+      </label>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Copia efeitos e keyframes das sequências <b>[PRESET]ZOOMIN</b> e <b>[PRESET]ZOOMOUT</b> pras imagens de preenchimento, alternando entre elas. Precisa que essas duas sequências existam no projeto, cada uma com um clip onde você aplicou o zoom desejado.</div>
     </div>
 
     <div class="section">
