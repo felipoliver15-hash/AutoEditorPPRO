@@ -4305,23 +4305,28 @@ function _geminiListarModelos(cb) {
     try { req.end(); } catch (e) { cb([]); }
 }
 
-// Versão mais nova primeiro; entre iguais, "flash" na frente (mais rápido e
-// barato) e "preview/exp" por último (menos estáveis).
+// Ordem pensada pro plano GRATUITO: "flash" vem SEMPRE antes de "pro",
+// independente da versão, porque os "pro" costumam não estar liberados na
+// camada gratuita (e são mais caros/lentos). Só depois disso é que a versão
+// mais nova ganha. "preview/exp" ficam por último (menos estáveis).
 function _geminiOrdenaModelos(a, b) {
+    function familia(n) {
+        if (/flash/i.test(n)) return 0;   // preferido
+        if (/pro/i.test(n))   return 2;   // evitar no plano gratuito
+        return 1;
+    }
+    var f = familia(a) - familia(b);
+    if (f) return f;
+
+    function instavel(n) { return /preview|exp|thinking/i.test(n) ? 1 : 0; }
+    var e = instavel(a) - instavel(b);
+    if (e) return e;
+
     function ver(n) {
         var m = String(n).match(/gemini-(\d+)(?:[.-](\d+))?/);
         return m ? parseFloat(m[1] + "." + (m[2] || "0")) : 0;
     }
-    var d = ver(b) - ver(a);
-    if (d) return d;
-    function peso(n) {
-        var p = 0;
-        if (/flash/i.test(n)) p -= 2;
-        if (/lite/i.test(n)) p -= 1;
-        if (/preview|exp|thinking/i.test(n)) p += 3;
-        return p;
-    }
-    return peso(a) - peso(b);
+    return ver(b) - ver(a);
 }
 function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
     var https = tryNodeRequire('https');
@@ -4377,15 +4382,23 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
             var r; try { r = JSON.parse(data); } catch (e) { retryOrFail("resposta não-JSON (HTTP " + res.statusCode + ")", res.statusCode === 503 || res.statusCode === 429); return; }
             if (r.error) {
                 var code = r.error.code, st = String(r.error.status || "");
-                var retryable = (code === 503 || code === 429 || st === "UNAVAILABLE" || st === "RESOURCE_EXHAUSTED" || st === "INTERNAL");
-                retryOrFail("erro " + (code || "") + ": " + String(r.error.message || "").slice(0, 150), retryable);
+                var msg  = "erro " + (code || "") + ": " + String(r.error.message || "").slice(0, 150);
+                // Sobrecarga (503) é temporária NAQUELE modelo → vale insistir.
+                var sobrecarga = (code === 503 || st === "UNAVAILABLE" || st === "INTERNAL");
+                // Cota (429) ou sem acesso (403) não melhoram insistindo — no plano
+                // gratuito é comum um modelo simplesmente não estar liberado.
+                // Vai direto pro próximo modelo.
+                var semAcesso = (code === 429 || code === 403 ||
+                                 st === "RESOURCE_EXHAUSTED" || st === "PERMISSION_DENIED");
+                if (semAcesso) { trocaDeModelo(msg); return; }
+                retryOrFail(msg, sobrecarga);
                 return;
             }
             var cand = (r.candidates || [])[0];
             if (!cand) { retryOrFail("não retornou conteúdo", true); return; }
             var txt = ((cand.content && cand.content.parts) || []).map(function (p) { return p.text || ""; }).join("");
             if (!txt) { retryOrFail("retornou vazio (finishReason: " + (cand.finishReason || "?") + ")", cand.finishReason !== "MAX_TOKENS"); return; }
-            cb(null, txt);
+            cb(null, txt, modelo);
         });
     });
     req.on("error", function (e) { retryOrFail("rede: " + e.message, true); });
@@ -4430,8 +4443,9 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
 
     log("Sem mapeamento na pasta — gerando com o Gemini (" + GEMINI_MODEL + ")… pode levar ~30-60s.");
 
-    _callGemini(systemPrompt, userText, function (err, txt) {
+    _callGemini(systemPrompt, userText, function (err, txt, modeloUsado) {
         if (err) { log("Gemini: " + err, "error"); finish(); return; }
+        if (modeloUsado && modeloUsado !== GEMINI_MODEL) log("Gemini: mapeamento gerado por '" + modeloUsado + "' (o padrao estava indisponivel).", "warn");
         var m; try { m = JSON.parse(_stripJSONFences(txt)); } catch (e) { log("Gemini devolveu JSON inválido: " + e.message, "error"); finish(); return; }
 
         var v = _validateMappingPhrases(m);
