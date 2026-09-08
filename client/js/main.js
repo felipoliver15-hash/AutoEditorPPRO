@@ -4269,6 +4269,36 @@ var GEMINI_MAX_ATTEMPTS = 3;   // por modelo (cada tentativa demora ~50s)
 var GEMINI_MAX_MODELOS  = 3;   // quantos modelos diferentes tentar ao todo
 var _geminiModelosCache = null;
 
+// O 429 do Gemini vem com os detalhes do QUE estourou (por minuto? por dia?) e
+// de quanto esperar — mas isso fica em error.details, não na mensagem. Sem essa
+// leitura, "You exceeded your current quota" não diz se é esperar 1 minuto ou
+// se acabou a cota do dia.
+function _geminiDetalheCota(erro) {
+    var partes = [];
+    try {
+        var det = (erro && erro.details) || [];
+        for (var i = 0; i < det.length; i++) {
+            var d = det[i] || {};
+            var tipo = String(d["@type"] || "");
+
+            if (tipo.indexOf("QuotaFailure") >= 0) {
+                var vs = d.violations || [];
+                for (var j = 0; j < vs.length && j < 2; j++) {
+                    var id = String(vs[j].quotaId || vs[j].quotaMetric || "");
+                    if (!id) continue;
+                    if (/PerDay/i.test(id))        partes.push("cota DIÁRIA do modelo");
+                    else if (/PerMinute/i.test(id)) partes.push("cota POR MINUTO");
+                    else                            partes.push(id);
+                }
+            }
+            if (tipo.indexOf("RetryInfo") >= 0 && d.retryDelay) {
+                partes.push("tente de novo em " + String(d.retryDelay));
+            }
+        }
+    } catch (e) {}
+    return partes.length ? " [" + partes.join(" — ") + "]" : "";
+}
+
 // Lista os modelos que a SUA chave tem disponíveis e servem pro mapeamento.
 // Consultar a API evita chutar nomes de modelo que podem nem existir.
 function _geminiListarModelos(cb) {
@@ -4382,7 +4412,8 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
             var r; try { r = JSON.parse(data); } catch (e) { retryOrFail("resposta não-JSON (HTTP " + res.statusCode + ")", res.statusCode === 503 || res.statusCode === 429); return; }
             if (r.error) {
                 var code = r.error.code, st = String(r.error.status || "");
-                var msg  = "erro " + (code || "") + ": " + String(r.error.message || "").slice(0, 150);
+                var msg  = "erro " + (code || "") + ": " + String(r.error.message || "").slice(0, 150)
+                         + _geminiDetalheCota(r.error);
                 // Sobrecarga (503) é temporária NAQUELE modelo → vale insistir.
                 var sobrecarga = (code === 503 || st === "UNAVAILABLE" || st === "INTERNAL");
                 // Cota (429) ou sem acesso (403) não melhoram insistindo — no plano
