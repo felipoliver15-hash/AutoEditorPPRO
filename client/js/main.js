@@ -4107,6 +4107,9 @@ function _applyMappingContent(content, filePath) {
     } else {
         log("JSON carregado: " + (loadedJSON.timeline || []).length + " item(s) na timeline.", "ok");
     }
+    if (_mapItemCount(loadedJSON) === 0) {
+        log("Atenção: o mapeamento está VAZIO (0 itens) — provavelmente a geração falhou. O botão Montar fica bloqueado até gerar um válido.", "warn");
+    }
     _savedJsonPath = filePath;
     saveProjectData();
 }
@@ -4262,11 +4265,70 @@ function _stripJSONFences(s) {
 // cb(errOrNull, mappingTextString). Re-tenta sozinho em erros TRANSITÓRIOS
 // (503/UNAVAILABLE, 429/RESOURCE_EXHAUSTED, rede) com backoff — o 503 de "alta
 // demanda" é comum e some na 2ª/3ª tentativa.
-var GEMINI_MAX_ATTEMPTS = 5;
-function _callGemini(systemPrompt, userText, cb, _attempt) {
+var GEMINI_MAX_ATTEMPTS = 3;   // por modelo (cada tentativa demora ~50s)
+var GEMINI_MAX_MODELOS  = 3;   // quantos modelos diferentes tentar ao todo
+var _geminiModelosCache = null;
+
+// Lista os modelos que a SUA chave tem disponíveis e servem pro mapeamento.
+// Consultar a API evita chutar nomes de modelo que podem nem existir.
+function _geminiListarModelos(cb) {
+    if (_geminiModelosCache) { cb(_geminiModelosCache); return; }
+    var https = tryNodeRequire('https');
+    if (!https) { cb([]); return; }
+    var req = https.request({
+        hostname: "generativelanguage.googleapis.com",
+        path: "/v1beta/models?pageSize=200&key=" + encodeURIComponent(getGeminiKey()),
+        method: "GET",
+        family: 4
+    }, function (res) {
+        var d = "";
+        res.on("data", function (c) { d += c; });
+        res.on("end", function () {
+            var lista = [];
+            try {
+                var r = JSON.parse(d);
+                (r.models || []).forEach(function (m) {
+                    var nome = String(m.name || "").replace(/^models\//, "");
+                    if (!/^gemini-/.test(nome)) return;
+                    if ((m.supportedGenerationMethods || []).indexOf("generateContent") < 0) return;
+                    // Fora: modelos que não servem pra gerar o JSON de mapeamento.
+                    if (/image|embedding|aqa|tts|live|vision|audio/i.test(nome)) return;
+                    lista.push(nome);
+                });
+            } catch (e) {}
+            lista.sort(_geminiOrdenaModelos);
+            _geminiModelosCache = lista;
+            cb(lista);
+        });
+    });
+    req.on("error", function () { cb([]); });
+    try { req.end(); } catch (e) { cb([]); }
+}
+
+// Versão mais nova primeiro; entre iguais, "flash" na frente (mais rápido e
+// barato) e "preview/exp" por último (menos estáveis).
+function _geminiOrdenaModelos(a, b) {
+    function ver(n) {
+        var m = String(n).match(/gemini-(\d+)(?:[.-](\d+))?/);
+        return m ? parseFloat(m[1] + "." + (m[2] || "0")) : 0;
+    }
+    var d = ver(b) - ver(a);
+    if (d) return d;
+    function peso(n) {
+        var p = 0;
+        if (/flash/i.test(n)) p -= 2;
+        if (/lite/i.test(n)) p -= 1;
+        if (/preview|exp|thinking/i.test(n)) p += 3;
+        return p;
+    }
+    return peso(a) - peso(b);
+}
+function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
     var https = tryNodeRequire('https');
     if (!https) { cb("Node 'https' indisponível no CEP.", null); return; }
-    var attempt = _attempt || 1;
+    var attempt  = _attempt || 1;
+    var modelo   = _modelo || GEMINI_MODEL;
+    var tentados = _tentados || [];
     var body = JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents: [{ role: "user", parts: [{ text: userText }] }],
@@ -4274,11 +4336,29 @@ function _callGemini(systemPrompt, userText, cb, _attempt) {
     });
     var len; try { len = Buffer.byteLength(body); } catch (e) { len = body.length; }
 
+    // Esgotou as tentativas neste modelo: o 503 costuma ser DAQUELE modelo, não
+    // da conta — então troca por outro em vez de insistir na mesma porta.
+    function trocaDeModelo(reason) {
+        if (tentados.indexOf(modelo) < 0) tentados.push(modelo);
+        if (tentados.length >= GEMINI_MAX_MODELOS) { cb(reason, null); return; }
+        _geminiListarModelos(function (lista) {
+            var proximo = null;
+            for (var i = 0; i < lista.length; i++) {
+                if (tentados.indexOf(lista[i]) < 0) { proximo = lista[i]; break; }
+            }
+            if (!proximo) { cb(reason, null); return; }
+            log("Gemini: '" + modelo + "' continua sobrecarregado — trocando pra '" + proximo + "'…", "warn");
+            _callGemini(systemPrompt, userText, cb, 1, proximo, tentados);
+        });
+    }
+
     function retryOrFail(reason, retryable) {
         if (retryable && attempt < GEMINI_MAX_ATTEMPTS) {
-            var wait = 3000 * attempt; // 3s, 6s, 9s, 12s
+            var wait = 3000 * attempt; // 3s, 6s
             log("Gemini ocupado (" + reason + ") — re-tentando (" + (attempt + 1) + "/" + GEMINI_MAX_ATTEMPTS + ") em " + (wait / 1000) + "s…", "warn");
-            setTimeout(function () { _callGemini(systemPrompt, userText, cb, attempt + 1); }, wait);
+            setTimeout(function () { _callGemini(systemPrompt, userText, cb, attempt + 1, modelo, tentados); }, wait);
+        } else if (retryable) {
+            trocaDeModelo(reason);
         } else {
             cb(reason, null);
         }
@@ -4286,7 +4366,7 @@ function _callGemini(systemPrompt, userText, cb, _attempt) {
 
     var req = https.request({
         hostname: "generativelanguage.googleapis.com",
-        path: "/v1beta/models/" + GEMINI_MODEL + ":generateContent?key=" + encodeURIComponent(getGeminiKey()),
+        path: "/v1beta/models/" + modelo + ":generateContent?key=" + encodeURIComponent(getGeminiKey()),
         method: "POST",
         family: 4,
         headers: { "Content-Type": "application/json", "Content-Length": len }
@@ -4502,11 +4582,25 @@ function exportSRTFromPremiere() {
     });
 }
 
+// Quantos itens de timeline o mapeamento tem (soma os produtos no formato novo).
+function _mapItemCount(j) {
+    if (!j) return 0;
+    if (j.products && j.products.length) {
+        var t = 0;
+        for (var i = 0; i < j.products.length; i++) t += ((j.products[i].timeline) || []).length;
+        return t;
+    }
+    return (j.timeline || []).length;
+}
+
 function updateMountButton() {
-    var hasJSON    = !!loadedJSON;
-    var btn        = document.getElementById("btn-mount");
-    btn.disabled   = !hasJSON;
-    btn.title      = hasJSON ? "" : "Carregue o JSON de mapeamento antes de montar";
+    var btn   = document.getElementById("btn-mount");
+    var itens = _mapItemCount(loadedJSON);
+    // Mapeamento vazio não monta nada — antes o botão liberava e a montagem
+    // rodava com 0 itens, escondendo que a geração tinha falhado.
+    btn.disabled = !loadedJSON || itens === 0;
+    btn.title    = !loadedJSON ? "Carregue o JSON de mapeamento antes de montar"
+                 : (itens === 0 ? "O mapeamento está vazio (0 itens) — gere de novo antes de montar" : "");
 }
 
 
