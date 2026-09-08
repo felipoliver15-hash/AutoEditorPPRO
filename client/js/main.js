@@ -1014,9 +1014,25 @@ function checkPluginUpdate(verbose) {
         var short = remoteSha.substring(0, 7);
         var local = _readLocalVersion();
         if (!local) {
-            // Primeira execução: assume install = última versão e salva o SHA.
-            _writeLocalVersion(remoteSha);
-            if (verbose) recLog("✓ Versão atual definida como " + short + " (primeira verificação).", "ok");
+            // Sem version.txt (o arquivo nao vai no repositorio, entao quem
+            // instala pelo ZIP nao o tem). ANTES isso presumia "ja esta na
+            // ultima versao" e gravava o SHA — o banner nunca aparecia e a
+            // instalacao ficava congelada na versao do ZIP pra sempre.
+            // Agora compara arquivo por arquivo com o repositorio.
+            _listarDiferencasDoRepo(remoteSha, function (errT, difs) {
+                if (errT) {
+                    if (verbose) recLog("✗ Não consegui comparar com o repositório: " + errT.message, "err");
+                    return;
+                }
+                if (!difs.length) {
+                    _writeLocalVersion(remoteSha);
+                    if (verbose) recLog("✓ Plugin atualizado (commit " + short + ")", "ok");
+                    return;
+                }
+                _pendingPluginUpdate = { localSha: null, remoteSha: remoteSha, files: difs, full: false };
+                _showUpdateBanner("Atualização disponível: " + difs.length + " arquivo(s) desatualizado(s)");
+                if (verbose) recLog("⚠ Instalação sem versão registrada — " + difs.length + " arquivo(s) diferentes do commit " + short + ".", "warn");
+            });
             return;
         }
         if (local === remoteSha) {
@@ -1027,9 +1043,24 @@ function checkPluginUpdate(verbose) {
         var cmpUrl = "https://api.github.com/repos/" + UPDATE_REPO_OWNER + "/" + UPDATE_REPO_NAME + "/compare/" + local + "..." + remoteSha;
         _httpsGet(cmpUrl, false, function (err2, cmp) {
             if (err2) {
-                _pendingPluginUpdate = { localSha: local, remoteSha: remoteSha, files: [], full: true };
-                _showUpdateBanner("Versão local antiga não pôde ser comparada — recomenda-se reinstalar.");
-                if (verbose) recLog("⚠ Versão local não pôde ser comparada — talvez force-push? Reinstale.", "warn");
+                // Commit local desconhecido (force-push, ZIP de outra época...).
+                // Em vez de mandar reinstalar na mão, compara arquivo por arquivo.
+                _listarDiferencasDoRepo(remoteSha, function (errT, difs) {
+                    if (errT) {
+                        _pendingPluginUpdate = { localSha: local, remoteSha: remoteSha, files: [], full: true };
+                        _showUpdateBanner("Versão local não pôde ser comparada — recomenda-se reinstalar.");
+                        if (verbose) recLog("⚠ Não deu pra comparar nem por commit nem por arquivo: " + errT.message, "warn");
+                        return;
+                    }
+                    if (!difs.length) {
+                        _writeLocalVersion(remoteSha);
+                        if (verbose) recLog("✓ Plugin atualizado (commit " + short + ")", "ok");
+                        return;
+                    }
+                    _pendingPluginUpdate = { localSha: local, remoteSha: remoteSha, files: difs, full: false };
+                    _showUpdateBanner("Atualização disponível: " + difs.length + " arquivo(s) desatualizado(s)");
+                    if (verbose) recLog("⚠ Commit local desconhecido — comparei por arquivo: " + difs.length + " diferente(s).", "warn");
+                });
                 return;
             }
             var files = cmp && cmp.files ? cmp.files : [];
@@ -1043,6 +1074,45 @@ function checkPluginUpdate(verbose) {
             _showUpdateBanner("Atualização disponível: " + files.length + " arquivo(s) — " + subj);
             if (verbose) recLog("⚠ Update disponível: " + files.length + " arquivo(s) (" + local.substring(0, 7) + " → " + short + ") — banner azul no topo do painel.", "warn");
         });
+    });
+}
+
+// Hash que o Git usa pra identificar o conteudo de um arquivo (sha1 de
+// "blob <tamanho>\0" + conteudo). A arvore da API do GitHub ja traz esse hash
+// por arquivo, entao da pra saber exatamente o que esta diferente sem baixar
+// nada — inclusive pulando os ~210 MB de binarios quando ja estao iguais.
+function _gitBlobSha(buf) {
+    var crypto = tryNodeRequire('crypto');
+    if (!crypto) return null;
+    var h = crypto.createHash("sha1");
+    h.update(Buffer.from("blob " + buf.length + "\0", "utf8"));
+    h.update(buf);
+    return h.digest("hex");
+}
+
+// Compara a instalacao local com a arvore do repositorio no commit dado e
+// devolve a lista de arquivos que precisam ser baixados. Usado quando nao da
+// pra confiar no version.txt (instalacao pelo ZIP, que nao traz o arquivo).
+function _listarDiferencasDoRepo(remoteSha, cb) {
+    var fsM = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
+    var extDir = getExtensionRootClient();
+    if (!fsM || !pmod || !extDir) { cb(new Error("Node/extensão indisponível")); return; }
+    var url = "https://api.github.com/repos/" + UPDATE_REPO_OWNER + "/" + UPDATE_REPO_NAME +
+              "/git/trees/" + remoteSha + "?recursive=1";
+    _httpsGet(url, false, function (err, tree) {
+        if (err || !tree || !tree.tree) { cb(err || new Error("árvore do repositório inválida")); return; }
+        var diferentes = [];
+        for (var i = 0; i < tree.tree.length; i++) {
+            var n = tree.tree[i];
+            if (!n || n.type !== "blob" || !n.path) continue;
+            var dest = pmod.join(extDir, String(n.path).replace(/\//g, pmod.sep));
+            var igual = false;
+            try {
+                if (fsM.existsSync(dest)) igual = (_gitBlobSha(fsM.readFileSync(dest)) === n.sha);
+            } catch (eH) { igual = false; }
+            if (!igual) diferentes.push({ filename: n.path, status: "modified" });
+        }
+        cb(null, diferentes);
     });
 }
 
