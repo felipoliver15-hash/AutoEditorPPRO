@@ -164,6 +164,7 @@ var _createdProducts = [];
 
 document.addEventListener("DOMContentLoaded", function () {
     _aeSetupManualProject();
+    _apiInit();
     loadConfig();
     initTabs();
     initMontar();
@@ -2321,7 +2322,11 @@ function _attemptAudioCut(path, tries) {
 // Geração do mapeamento via Gemini (fallback quando não há *_autoeditor.json).
 // 2.5-flash é o que roda no free tier (2.5-pro exige billing). Chave salva
 // neste PC; lista de produtos lembrada por projeto.
-var GEMINI_KEY_STORAGE = "autoeditor_gemini_apikey";
+// Uma chave do Gemini so, usada TANTO pelo mapeamento quanto pela geracao de
+// imagens. Antes isto estava declarado duas vezes (aqui e na secao de IA) com
+// valores diferentes: como o nome da variavel era o mesmo, a segunda vencia e
+// "autoeditor_gemini_apikey" nunca chegou a ser usado. Agora e uma so.
+var GEMINI_KEY_STORAGE = "autoeditor_gemini_key";
 var GEMINI_MODEL = "gemini-2.5-flash";
 function _geminiProductsKey() { return (typeof _projectKey !== "undefined" && _projectKey ? _projectKey : "default") + "_gemini_products"; }
 function getGeminiKey() { try { return (localStorage.getItem(GEMINI_KEY_STORAGE) || "").trim(); } catch (e) { return ""; } }
@@ -3139,7 +3144,8 @@ function createTemplateSequencesAction() {
 
 // ─── IA (Gemini image generation) ─────────────────────────────────────────────
 
-var GEMINI_KEY_STORAGE   = "autoeditor_gemini_key";
+// GEMINI_KEY_STORAGE e declarado la em cima (secao do mapeamento) — e a mesma
+// chave do Gemini pros dois usos.
 var GEMINI_MODEL_STORAGE = "autoeditor_gemini_model";
 var IA_SLOT_DUR_STORAGE  = "autoeditor_ia_slot_duration";
 var IA_NUM_IMAGES_STORAGE = "autoeditor_ia_num_images";
@@ -3961,6 +3967,8 @@ function _watchProjectChanges() {
             } catch (eGP) {}
             // Música de fundo por sigla (deriva o nome do projeto do caminho do .prproj).
             try { _bgmLoadForProject(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eBg) {}
+            // Perfil de API por sigla do canal (ver módulo PERFIS DE API).
+            try { _apiAoAbrirProjeto(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eApi) {}
 
             // Renomeia a sequência do template pro nome do projeto ("MT 00" → "MT 108").
             // Ficou desligado por um tempo porque suspeitei que `seq.name = ...` derrubava
@@ -7200,4 +7208,280 @@ function esc(str) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
+}
+
+// ─── PERFIS DE API ────────────────────────────────────────────────────────────
+// Permite ter mais de um conjunto de chaves (Drive + Gemini) cadastrado e
+// alternar entre eles sem ficar copiando e colando chave a cada troca de canal.
+//
+// Como conversa com o resto do plugin: ATIVAR um perfil grava os valores dele
+// nas MESMAS chaves de localStorage que o plugin sempre usou
+// (DRIVE_KEY_STORAGE / DRIVE_ROOT_STORAGE / GEMINI_KEY_STORAGE). Assim nenhum
+// dos pontos que leem essas chaves precisou mudar — eles nem sabem que perfis
+// existem.
+//
+// O vínculo é por SIGLA do canal (MT, ET, GT...), então ao abrir um projeto
+// daquele canal o perfil certo entra sozinho.
+
+var API_PERFIS_STORAGE = "autoeditor_api_perfis";      // [{id,nome,driveKey,driveRoot,geminiKey}]
+var API_MAPA_STORAGE   = "autoeditor_api_mapa_sigla";  // {SIGLA: idDoPerfil}
+var API_ATIVO_STORAGE  = "autoeditor_api_ativo";       // id do perfil em uso
+var _apiSiglaAtual     = "";                           // sigla do projeto aberto
+
+function _apiLerPerfis() {
+    try {
+        var raw = localStorage.getItem(API_PERFIS_STORAGE);
+        var l = raw ? JSON.parse(raw) : [];
+        return (l && l.length) ? l : [];
+    } catch (e) { return []; }
+}
+function _apiSalvarPerfis(lista) {
+    try { localStorage.setItem(API_PERFIS_STORAGE, JSON.stringify(lista || [])); } catch (e) {}
+}
+function _apiLerMapa() {
+    try { return JSON.parse(localStorage.getItem(API_MAPA_STORAGE) || "{}") || {}; } catch (e) { return {}; }
+}
+function _apiSalvarMapa(m) {
+    try { localStorage.setItem(API_MAPA_STORAGE, JSON.stringify(m || {})); } catch (e) {}
+}
+function _apiPerfilPorId(id) {
+    var l = _apiLerPerfis();
+    for (var i = 0; i < l.length; i++) if (l[i].id === id) return l[i];
+    return null;
+}
+function _apiIdAtivo() {
+    try { return localStorage.getItem(API_ATIVO_STORAGE) || ""; } catch (e) { return ""; }
+}
+function _apiNovoId() {
+    return "p" + Date.now() + "_" + Math.floor(Math.random() * 10000);
+}
+
+// Primeira execução: as chaves que já estavam soltas viram um perfil, pra não
+// perder nada de quem já usava o plugin antes dos perfis existirem.
+function _apiMigrarSeNecessario() {
+    var lista = _apiLerPerfis();
+    if (lista.length) return lista;
+    var dk = "", dr = "", gk = "";
+    try { dk = localStorage.getItem(DRIVE_KEY_STORAGE)  || ""; } catch (e) {}
+    try { dr = localStorage.getItem(DRIVE_ROOT_STORAGE) || ""; } catch (e) {}
+    try { gk = localStorage.getItem(GEMINI_KEY_STORAGE) || ""; } catch (e) {}
+    if (!dk && !dr && !gk) return lista;
+    lista = [{ id: _apiNovoId(), nome: "Padrão", driveKey: dk, driveRoot: dr, geminiKey: gk }];
+    _apiSalvarPerfis(lista);
+    try { localStorage.setItem(API_ATIVO_STORAGE, lista[0].id); } catch (e) {}
+    return lista;
+}
+
+function _apiSetCampo(id, valor) {
+    var el = document.getElementById(id);
+    if (el) el.value = valor || "";
+}
+
+// Ativa o perfil: grava nas chaves que o plugin já lê e espelha nos campos.
+function _apiAtivarPerfil(id, silencioso) {
+    var p = _apiPerfilPorId(id);
+    if (!p) return false;
+    try {
+        localStorage.setItem(DRIVE_KEY_STORAGE,  p.driveKey  || "");
+        localStorage.setItem(DRIVE_ROOT_STORAGE, p.driveRoot || "");
+        localStorage.setItem(GEMINI_KEY_STORAGE, p.geminiKey || "");
+        localStorage.setItem(API_ATIVO_STORAGE,  p.id);
+    } catch (e) {}
+    _apiSetCampo("drive-apikey",   p.driveKey);
+    _apiSetCampo("drive-root",     p.driveRoot);
+    _apiSetCampo("gemini-apikey",  p.geminiKey);
+    _apiSetCampo("gemini-api-key", p.geminiKey);
+    // A raiz do Drive e a chave mudaram → o que estava em cache não vale mais.
+    try { _driveResetChannelCache(); } catch (e) {}
+    try { _geminiModelosCache = null; } catch (e) {}
+    if (!silencioso) recLog("API: perfil '" + p.nome + "' ativado.", "ok");
+    _apiRenderizar();
+    return true;
+}
+
+// Chamado quando o projeto aberto muda: aplica o perfil vinculado à sigla.
+function _apiAoAbrirProjeto(prjName) {
+    _apiSiglaAtual = _projectSigla(prjName);
+    _apiMigrarSeNecessario();
+    if (!_apiSiglaAtual) { _apiRenderizar(); return; }
+
+    var mapa = _apiLerMapa();
+    var id   = mapa[_apiSiglaAtual];
+    if (id && _apiPerfilPorId(id)) {
+        if (id !== _apiIdAtivo()) _apiAtivarPerfil(id, true);
+        var p = _apiPerfilPorId(id);
+        recLog("API: canal " + _apiSiglaAtual + " → perfil '" + p.nome + "'.", "ok");
+    } else if (_apiLerPerfis().length) {
+        recLog("API: o canal " + _apiSiglaAtual + " ainda não tem perfil de API — escolha um na aba API.", "warn");
+    } else {
+        recLog("API: nenhum perfil cadastrado — crie um na aba API (Drive + Gemini).", "warn");
+    }
+    _apiRenderizar();
+}
+
+// Desenha a aba: lista de perfis, campos do selecionado e vínculos por canal.
+function _apiRenderizar() {
+    var sel = document.getElementById("api-perfil-select");
+    if (!sel) return;
+
+    var lista = _apiLerPerfis();
+    var ativo = _apiIdAtivo();
+    if (!_apiPerfilPorId(ativo) && lista.length) ativo = lista[0].id;
+
+    sel.innerHTML = "";
+    if (!lista.length) {
+        var o = document.createElement("option");
+        o.value = ""; o.textContent = "(nenhum perfil — clique em Novo)";
+        sel.appendChild(o);
+    }
+    for (var i = 0; i < lista.length; i++) {
+        var op = document.createElement("option");
+        op.value = lista[i].id;
+        op.textContent = lista[i].nome;
+        if (lista[i].id === ativo) op.selected = true;
+        sel.appendChild(op);
+    }
+
+    var p = _apiPerfilPorId(ativo);
+    _apiSetCampo("api-drive-key",  p ? p.driveKey  : "");
+    _apiSetCampo("api-drive-root", p ? p.driveRoot : "");
+    _apiSetCampo("api-gemini-key", p ? p.geminiKey : "");
+
+    // Situação do canal aberto.
+    var st = document.getElementById("api-canal-status");
+    var btnVincular = document.getElementById("btn-api-vincular");
+    if (st) {
+        if (!_apiSiglaAtual) {
+            st.textContent = "Nenhum projeto aberto — abra um projeto pra vincular um perfil ao canal.";
+            st.style.color = "#888";
+        } else {
+            var mapa = _apiLerMapa();
+            var vinc = _apiPerfilPorId(mapa[_apiSiglaAtual]);
+            if (vinc) {
+                st.textContent = "Canal " + _apiSiglaAtual + " → perfil '" + vinc.nome + "'";
+                st.style.color = "#5fbf5f";
+            } else {
+                st.textContent = "Canal " + _apiSiglaAtual + " ainda SEM perfil — escolha acima e clique em “Usar neste canal”.";
+                st.style.color = "#d8a657";
+            }
+        }
+    }
+    if (btnVincular) {
+        btnVincular.disabled = !(_apiSiglaAtual && p);
+        btnVincular.textContent = _apiSiglaAtual ? ("Usar neste canal (" + _apiSiglaAtual + ")") : "Usar neste canal";
+    }
+
+    // Lista de vínculos já existentes.
+    var vl = document.getElementById("api-vinculos");
+    if (vl) {
+        var mapa2 = _apiLerMapa();
+        var linhas = [];
+        for (var s in mapa2) {
+            if (!Object.prototype.hasOwnProperty.call(mapa2, s)) continue;
+            var pp = _apiPerfilPorId(mapa2[s]);
+            linhas.push(s + " → " + (pp ? pp.nome : "(perfil removido)"));
+        }
+        linhas.sort();
+        vl.textContent = linhas.length ? linhas.join("   |   ") : "nenhum canal vinculado ainda";
+    }
+}
+
+// Salva o que está nos campos da aba API dentro do perfil selecionado.
+function _apiSalvarCamposNoPerfil() {
+    var sel = document.getElementById("api-perfil-select");
+    if (!sel || !sel.value) return;
+    var lista = _apiLerPerfis();
+    for (var i = 0; i < lista.length; i++) {
+        if (lista[i].id !== sel.value) continue;
+        var dk = document.getElementById("api-drive-key");
+        var dr = document.getElementById("api-drive-root");
+        var gk = document.getElementById("api-gemini-key");
+        lista[i].driveKey  = dk ? dk.value.replace(/^\s+|\s+$/g, "") : "";
+        lista[i].driveRoot = dr ? dr.value.replace(/^\s+|\s+$/g, "") : "";
+        lista[i].geminiKey = gk ? gk.value.replace(/^\s+|\s+$/g, "") : "";
+        _apiSalvarPerfis(lista);
+        // Se é o perfil em uso, reflete na hora nas chaves ativas.
+        if (lista[i].id === _apiIdAtivo()) _apiAtivarPerfil(lista[i].id, true);
+        return;
+    }
+}
+
+function _apiInit() {
+    _apiMigrarSeNecessario();
+
+    var sel = document.getElementById("api-perfil-select");
+    if (sel) sel.addEventListener("change", function () {
+        if (sel.value) _apiAtivarPerfil(sel.value);
+    });
+
+    var novo = document.getElementById("btn-api-novo");
+    if (novo) novo.addEventListener("click", function () {
+        var nome = prompt("Nome do perfil (ex: Canal Tech, Canal Ferramentas):", "");
+        if (nome === null) return;
+        nome = String(nome).replace(/^\s+|\s+$/g, "");
+        if (!nome) return;
+        var lista = _apiLerPerfis();
+        var p = { id: _apiNovoId(), nome: nome, driveKey: "", driveRoot: "", geminiKey: "" };
+        lista.push(p);
+        _apiSalvarPerfis(lista);
+        _apiAtivarPerfil(p.id);
+        recLog("API: perfil '" + nome + "' criado — preencha as chaves abaixo.", "ok");
+    });
+
+    var ren = document.getElementById("btn-api-renomear");
+    if (ren) ren.addEventListener("click", function () {
+        var sel2 = document.getElementById("api-perfil-select");
+        var p = sel2 ? _apiPerfilPorId(sel2.value) : null;
+        if (!p) return;
+        var nome = prompt("Novo nome para o perfil:", p.nome);
+        if (nome === null) return;
+        nome = String(nome).replace(/^\s+|\s+$/g, "");
+        if (!nome) return;
+        var lista = _apiLerPerfis();
+        for (var i = 0; i < lista.length; i++) if (lista[i].id === p.id) lista[i].nome = nome;
+        _apiSalvarPerfis(lista);
+        _apiRenderizar();
+    });
+
+    var del = document.getElementById("btn-api-excluir");
+    if (del) del.addEventListener("click", function () {
+        var sel2 = document.getElementById("api-perfil-select");
+        var p = sel2 ? _apiPerfilPorId(sel2.value) : null;
+        if (!p) return;
+        // Avisa quais canais ficam órfãos antes de apagar.
+        var mapa = _apiLerMapa(), presos = [];
+        for (var s in mapa) if (Object.prototype.hasOwnProperty.call(mapa, s) && mapa[s] === p.id) presos.push(s);
+        var aviso = "Excluir o perfil '" + p.nome + "'?";
+        if (presos.length) aviso += "\n\nOs canais " + presos.join(", ") + " ficarão sem perfil.";
+        if (!confirm(aviso)) return;
+        var lista = _apiLerPerfis().filter(function (x) { return x.id !== p.id; });
+        _apiSalvarPerfis(lista);
+        for (var k = 0; k < presos.length; k++) delete mapa[presos[k]];
+        _apiSalvarMapa(mapa);
+        if (lista.length) _apiAtivarPerfil(lista[0].id, true);
+        recLog("API: perfil '" + p.nome + "' excluído.", "warn");
+        _apiRenderizar();
+    });
+
+    var vinc = document.getElementById("btn-api-vincular");
+    if (vinc) vinc.addEventListener("click", function () {
+        var sel2 = document.getElementById("api-perfil-select");
+        var p = sel2 ? _apiPerfilPorId(sel2.value) : null;
+        if (!p || !_apiSiglaAtual) return;
+        var mapa = _apiLerMapa();
+        mapa[_apiSiglaAtual] = p.id;
+        _apiSalvarMapa(mapa);
+        _apiAtivarPerfil(p.id, true);
+        recLog("API: canal " + _apiSiglaAtual + " agora usa o perfil '" + p.nome + "' (fica salvo).", "ok");
+        _apiRenderizar();
+    });
+
+    var ids = ["api-drive-key", "api-drive-root", "api-gemini-key"];
+    for (var i = 0; i < ids.length; i++) {
+        var el = document.getElementById(ids[i]);
+        if (el) el.addEventListener("input", _apiSalvarCamposNoPerfil);
+    }
+
+    // Sem projeto aberto ainda: só desenha o estado atual.
+    _apiRenderizar();
 }
