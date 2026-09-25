@@ -773,7 +773,10 @@ function initRecursos() {
     }
     var driveBtn = document.getElementById("btn-drive-import");
     if (driveBtn) driveBtn.addEventListener("click", function () {
-        var k = ((document.getElementById("drive-apikey") || {}).value || "").trim();
+        // Cai no localStorage: a chave vem do perfil ativo (aba API) e o campo
+        // aqui esta escondido — nao da pra depender so dele.
+        var k = ((document.getElementById("drive-apikey") || {}).value ||
+                 localStorage.getItem(DRIVE_KEY_STORAGE) || "").trim();
         var f = ((document.getElementById("drive-folder") || {}).value || "").trim();
         try { localStorage.setItem(DRIVE_KEY_STORAGE, k); } catch (e) {}
         importProductsFromDrive(k, f, function (num, opts) {
@@ -968,8 +971,11 @@ function _httpsGet(url, asBinary, cb, _depth) {
                     } catch (e) {
                         // Corpo não-JSON: página anti-abuso do Google ("Sorry…/automated
                         // queries") = throttle POR IP/REDE (não é cota da API). Some em horas.
-                        if (/automated queries|We.?re sorry|unusual traffic/i.test(ebody))
+                        if (/automated queries|We.?re sorry|unusual traffic/i.test(ebody)) {
                             reason = "Google bloqueou temporariamente esta REDE por excesso de downloads (aguarde algumas horas)";
+                            // Arma o disjuntor: nao adianta seguir pedindo.
+                            try { _driveMarcarBloqueio(); } catch (eB) {}
+                        }
                     }
                     cb(new Error("HTTP " + res.statusCode + (reason ? " (" + reason + ")" : "") + " " + url));
                 });
@@ -2339,12 +2345,33 @@ function getGeminiProducts() { var el = document.getElementById("gemini-products
 // done() que DEVE ser chamado ao terminar; a próxima só começa depois.
 var _dlQueue = [], _dlActive = 0, _DL_MAX_CONCURRENT = 3;
 
+// ── Disjuntor do Drive ───────────────────────────────────────────────────────
+// Quando o Google devolve a pagina anti-abuso (403 por IP/REDE, nao por cota da
+// API), continuar pedindo arquivo por arquivo so martela um servico que ja nos
+// barrou — e costuma esticar o bloqueio. Ao detectar, paramos de tentar: os
+// downloads restantes falham na hora, sem tocar na rede, e vao pra fila do botao
+// "Re-tentar downloads que falharam". O bloqueio do Google some sozinho em
+// algumas horas; os 30 min aqui sao so pra nao ficar preso caso passe antes.
+var _driveBloqueioAte = 0;
+function _driveBloqueado() { return Date.now() < _driveBloqueioAte; }
+function _driveLimparBloqueio() { _driveBloqueioAte = 0; }
+function _driveMarcarBloqueio() {
+    if (_driveBloqueado()) return;   // ja avisado nesta rodada
+    _driveBloqueioAte = Date.now() + 30 * 60 * 1000;
+    recLog("\u26d4 Drive: o Google bloqueou esta REDE por excesso de downloads. Parei as tentativas pra nao piorar — espere algumas horas e use \u201cRe-tentar downloads que falharam\u201d.", "err");
+}
+function _driveErroBloqueio() {
+    return new Error("Drive bloqueado por excesso de downloads nesta rede — tentativa adiada");
+}
+
 // Downloads que falharam de verdade (não os archive-skip) — pro botão de re-tentar.
 // Cada item: { label, run(done2) } onde run re-baixa e estagia no card certo.
 var _failedDownloads = [];
 function retryFailedDownloads() {
     if (!_failedDownloads.length) { recLog("Nenhum download falhado pra re-tentar.", "info"); return; }
     var list = _failedDownloads.splice(0); // pega todos e zera a lista
+    // Re-tentar e uma decisao do usuario: solta o disjuntor pra valer a tentativa.
+    _driveLimparBloqueio();
     recLog("↻ Re-tentando " + list.length + " download(s) que falharam…");
     list.forEach(function (item) {
         enqueueDownloadTask(function (done) {
@@ -2443,6 +2470,7 @@ function _driveList(apiKey, folderId, cb) {
 
 // Baixa um arquivo do Drive (alt=media) pra destPath. cb(err, destPath).
 function _driveDownload(apiKey, fileId, destPath, cb) {
+    if (_driveBloqueado()) { cb(_driveErroBloqueio()); return; }
     var url = "https://www.googleapis.com/drive/v3/files/" + fileId +
               "?alt=media&supportsAllDrives=true&key=" + encodeURIComponent(apiKey);
     _httpsGet(url, true, function (err, buf) {
@@ -2466,6 +2494,7 @@ function _extractLinksFromText(content) {
 // preenche o campo da lista de produtos do Gemini (e salva por projeto). Assim
 // não precisa colar a lista na mão. O arquivo presente é a fonte de verdade.
 function _driveFillProductNames(apiKey, children, prjDir) {
+    if (_driveBloqueado()) return;
     var f = null;
     for (var i = 0; i < children.length; i++) {
         var c = children[i];
@@ -2514,7 +2543,7 @@ function _withProjectDir(cb, tries) {
 // projeto. É o título/tema do vídeo, usado pra preencher o benefício da linha
 // "Introdução" na aba Capítulos (veja _lerVideoTema).
 function _driveFetchVideoTema(apiKey, children, prjDir) {
-    if (!prjDir) return;
+    if (!prjDir || _driveBloqueado()) return;
     var f = null;
     for (var i = 0; i < children.length; i++) {
         var c = children[i];
