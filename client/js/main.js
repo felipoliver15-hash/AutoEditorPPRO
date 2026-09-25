@@ -1283,8 +1283,26 @@ function detectFfmpeg(cb) {
 // NÃO importa pro bin — entrega o caminho final via onDone(err, filePath).
 // onProgress(text) é chamado durante o download (texto pra UI da barra).
 // Usado pela barrinha "Baixar do YouTube" dentro do card de Adicionar Produto.
+// A Amazon tem varias formas de URL pro MESMO produto, mas o yt-dlp so reconhece
+// a canonica /dp/<ASIN>. Link de celular (/gp/aw/d/ASIN?th=1) e alguns /gp/product/
+// davam "Unsupported URL" e o download morria ali. Aqui qualquer uma delas vira
+// /dp/<ASIN>, mantendo o dominio (.com.br, .com...). Quem nao for Amazon passa
+// intacto.
+function _normalizarUrlAmazon(url) {
+    var u = String(url || "");
+    var dominio = u.match(/^(https?:\/\/[^\/?#]*amazon\.[^\/?#]*)\//i);
+    if (!dominio) return u;
+    // ASIN = 10 alfanumericos logo depois de um dos prefixos conhecidos.
+    var asin = u.match(/\/(?:dp|gp\/product|gp\/aw\/d|product|gp\/offer-listing)\/([A-Za-z0-9]{10})(?![A-Za-z0-9])/);
+    if (!asin) return u;
+    return dominio[1] + "/dp/" + asin[1].toUpperCase();
+}
+
 function downloadYTToFolder(folder, url, onProgress, onDone, chooser) {
     if (!url) { onDone(new Error("Cole uma URL primeiro.")); return; }
+    var _urlOriginal = url;
+    url = _normalizarUrlAmazon(url);
+    if (url !== _urlOriginal) recLog("Link da Amazon ajustado pro formato que o yt-dlp aceita: " + url);
     var extDir = getExtensionRootClient();
     cs.evalScript("getProjectDir()", function (rawPrj) {
         var prjDir = "";
