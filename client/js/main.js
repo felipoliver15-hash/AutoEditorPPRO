@@ -2351,7 +2351,24 @@ function _attemptAudioCut(path, tries) {
 // valores diferentes: como o nome da variavel era o mesmo, a segunda vencia e
 // "autoeditor_gemini_apikey" nunca chegou a ser usado. Agora e uma so.
 var GEMINI_KEY_STORAGE = "autoeditor_gemini_key";
-var GEMINI_MODEL = "gemini-2.5-flash";
+// Padrao de partida. O Google aposenta modelo de tempos em tempos (o
+// gemini-2.5-flash passou a responder 404 "no longer available"), entao isto e
+// so o ponto de partida: quando o modelo nao existe mais, o plugin descobre um
+// substituto pela API e GRAVA o que funcionou, passando a comecar por ele.
+var GEMINI_MODEL = "gemini-3.8-flash";
+var GEMINI_MODELO_OK_STORAGE = "autoeditor_gemini_modelo_ok";
+
+// Modelo por onde comecar: o ultimo que deu certo nesta maquina, ou o padrao.
+function _geminiModeloPreferido() {
+    try {
+        var m = (localStorage.getItem(GEMINI_MODELO_OK_STORAGE) || "").trim();
+        if (m) return m;
+    } catch (e) {}
+    return GEMINI_MODEL;
+}
+function _geminiEsquecerModelo() {
+    try { localStorage.removeItem(GEMINI_MODELO_OK_STORAGE); } catch (e) {}
+}
 function _geminiProductsKey() { return (typeof _projectKey !== "undefined" && _projectKey ? _projectKey : "default") + "_gemini_products"; }
 function getGeminiKey() { try { return (localStorage.getItem(GEMINI_KEY_STORAGE) || "").trim(); } catch (e) { return ""; } }
 function getGeminiProducts() { var el = document.getElementById("gemini-products"); return el ? (el.value || "").trim() : ""; }
@@ -4487,7 +4504,7 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
     var https = tryNodeRequire('https');
     if (!https) { cb("Node 'https' indisponível no CEP.", null); return; }
     var attempt  = _attempt || 1;
-    var modelo   = _modelo || GEMINI_MODEL;
+    var modelo   = _modelo || _geminiModeloPreferido();
     var tentados = _tentados || [];
     var body = JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
@@ -4546,6 +4563,16 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
                 // Vai direto pro próximo modelo.
                 var semAcesso = (code === 429 || code === 403 ||
                                  st === "RESOURCE_EXHAUSTED" || st === "PERMISSION_DENIED");
+                // Modelo aposentado/inexistente (404). Insistir nao adianta — e
+                // como o padrao fica gravado, tambem precisa ser esquecido, senao
+                // toda chamada seguinte comecaria de novo pelo modelo morto.
+                var modeloMorto = (code === 404 || st === "NOT_FOUND" ||
+                                   /no longer available|is not found|not found for API/i.test(String(r.error.message || "")));
+                if (modeloMorto) {
+                    _geminiEsquecerModelo();
+                    trocaDeModelo(msg);
+                    return;
+                }
                 if (semAcesso) { trocaDeModelo(msg); return; }
                 retryOrFail(msg, sobrecarga);
                 return;
@@ -4554,6 +4581,8 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
             if (!cand) { retryOrFail("não retornou conteúdo", true); return; }
             var txt = ((cand.content && cand.content.parts) || []).map(function (p) { return p.text || ""; }).join("");
             if (!txt) { retryOrFail("retornou vazio (finishReason: " + (cand.finishReason || "?") + ")", cand.finishReason !== "MAX_TOKENS"); return; }
+            // Deu certo: lembra pra comecar por ele na proxima.
+            try { localStorage.setItem(GEMINI_MODELO_OK_STORAGE, modelo); } catch (eS) {}
             cb(null, txt, modelo);
         });
     });
@@ -4597,11 +4626,12 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
         "\n\n## TRANSCRIÇÃO (narração — os after_phrase devem ser trechos LITERAIS e consecutivos daqui)\n" + transcriptText +
         "\n\nGere AGORA somente o objeto JSON de mapeamento.";
 
-    log("Sem mapeamento na pasta — gerando com o Gemini (" + GEMINI_MODEL + ")… pode levar ~30-60s.");
+    var modeloInicial = _geminiModeloPreferido();
+    log("Sem mapeamento na pasta — gerando com o Gemini (" + modeloInicial + ")… pode levar ~30-60s.");
 
     _callGemini(systemPrompt, userText, function (err, txt, modeloUsado) {
         if (err) { log("Gemini: " + err, "error"); finish(); return; }
-        if (modeloUsado && modeloUsado !== GEMINI_MODEL) log("Gemini: mapeamento gerado por '" + modeloUsado + "' (o padrao estava indisponivel).", "warn");
+        if (modeloUsado && modeloUsado !== modeloInicial) log("Gemini: mapeamento gerado por '" + modeloUsado + "' (o modelo anterior estava indisponivel) — passo a usar esse.", "warn");
         var m; try { m = JSON.parse(_stripJSONFences(txt)); } catch (e) { log("Gemini devolveu JSON inválido: " + e.message, "error"); finish(); return; }
 
         var v = _validateMappingPhrases(m);
