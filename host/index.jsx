@@ -5005,6 +5005,80 @@ function muteInsertedAudio(seq, name, startSec) {
 //    e sem blur — esse é o foreground.
 // O resultado é o vídeo cheio visível em cima de uma versão borrada cobrindo o frame todo.
 // Só aplica em vídeo (forceExact=false). Se W/H >= 1.2 considera landscape e pula.
+// Tira acento e caixa, pra comparar nome de efeito/propriedade sem depender do
+// idioma do Premiere ("Desfoque Gaussiano", "Desfoque gaussiano", "Gaussian Blur").
+function _normNomeFx(s) {
+    s = String(s == null ? "" : s).toLowerCase();
+    var de = "\u00e1\u00e0\u00e3\u00e2\u00e4\u00e9\u00e8\u00ea\u00eb\u00ed\u00ec\u00ee\u00ef\u00f3\u00f2\u00f5\u00f4\u00f6\u00fa\u00f9\u00fb\u00fc\u00e7";
+    var pra = "aaaaaeeeeiiiiooooouuuuc";
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+        var p = de.indexOf(s.charAt(i));
+        out += (p >= 0) ? pra.charAt(p) : s.charAt(i);
+    }
+    return out;
+}
+
+// Procura o efeito de desfoque gaussiano no catalogo do Premiere. Antes a busca
+// era por nome exato numa lista fixa; num Premiere em portugues (ou espanhol, ou
+// com o nome levemente diferente) nada casava, o efeito NAO era adicionado e o
+// fundo ficava nitido — sem erro nenhum, so o resultado errado na tela.
+// Aqui: tenta os nomes conhecidos e, se falhar, varre o catalogo atras de
+// qualquer efeito cujo nome contenha "gauss" (ou "desfoque"/"blur" como ultimo
+// recurso). Devolve { fx, nome } ou null.
+function _acharEfeitoDesfoque(logArr) {
+    var conhecidos = ["Gaussian Blur", "Desfoque Gaussiano", "Desfoque gaussiano",
+                      "Desenfoque gaussiano", "Flou gaussien", "Gau\u00dfscher Weichzeichner"];
+    for (var i = 0; i < conhecidos.length; i++) {
+        try {
+            var fx = qe.project.getVideoEffectByName(conhecidos[i]);
+            if (fx) return { fx: fx, nome: conhecidos[i] };
+        } catch (e) {}
+    }
+
+    // Varre o catalogo — a API do QE varia de versao, entao tenta as formas
+    // conhecidas e ignora a que nao existir.
+    var nomes = [];
+    try {
+        var lista = qe.project.getVideoEffectList();
+        if (lista && lista.length) {
+            for (var a = 0; a < lista.length; a++) nomes.push(String(lista[a]));
+        }
+    } catch (e1) {}
+    if (!nomes.length) {
+        try {
+            var n = qe.project.numVideoEffects;
+            for (var b = 0; b < n; b++) {
+                try { nomes.push(String(qe.project.getVideoEffectByIndex(b).name)); } catch (e2) {}
+            }
+        } catch (e3) {}
+    }
+
+    var ordem = ["gauss", "desfoque", "blur"];
+    for (var o = 0; o < ordem.length; o++) {
+        for (var c = 0; c < nomes.length; c++) {
+            if (_normNomeFx(nomes[c]).indexOf(ordem[o]) < 0) continue;
+            try {
+                var achado = qe.project.getVideoEffectByName(nomes[c]);
+                if (achado) {
+                    if (logArr) logArr.push("blur fx achado no catalogo: '" + nomes[c] + "'");
+                    return { fx: achado, nome: nomes[c] };
+                }
+            } catch (e4) {}
+        }
+    }
+    if (logArr) {
+        logArr.push("blur fx NAO encontrado (catalogo com " + nomes.length + " efeito(s))");
+        // Amostra pra diagnosticar se acontecer de novo.
+        var amostra = [];
+        for (var d = 0; d < nomes.length && amostra.length < 8; d++) {
+            if (/gauss|desfoque|blur|flou|weich/i.test(nomes[d])) amostra.push(nomes[d]);
+        }
+        if (amostra.length) logArr.push("  parecidos: " + amostra.join(" | "));
+    }
+    return null;
+}
+
 function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationSec, sfRes, inOffsetSec, forceLayered) {
     var info = { applied: false, log: [] };
     try {
@@ -5053,19 +5127,14 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
                 } catch (eQS) {}
             }
             if (qeClip) {
-                var effectCandidates = ["Gaussian Blur", "Desfoque Gaussiano", "Desfoque gaussiano"];
-                for (var en = 0; en < effectCandidates.length; en++) {
+                var achadoFx = _acharEfeitoDesfoque(info.log);
+                if (achadoFx) {
                     try {
-                        var fx = qe.project.getVideoEffectByName(effectCandidates[en]);
-                        if (fx) {
-                            qeClip.addVideoEffect(fx);
-                            blurEffectName = effectCandidates[en];
-                            info.log.push("blur fx adicionado: " + blurEffectName);
-                            break;
-                        }
-                    } catch (eFn) {}
+                        qeClip.addVideoEffect(achadoFx.fx);
+                        blurEffectName = achadoFx.nome;
+                        info.log.push("blur fx adicionado: " + blurEffectName);
+                    } catch (eAdd2) { info.log.push("addVideoEffect err: " + eAdd2.message); }
                 }
-                if (!blurEffectName) info.log.push("blur fx: não encontrado por nome em " + effectCandidates.join("/"));
             } else {
                 info.log.push("qeClip não achado");
             }
@@ -5081,8 +5150,13 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
                         for (var pi = 0; pi < comp.properties.numItems; pi++) {
                             var prop = comp.properties[pi];
                             var pdn = prop.displayName || "";
-                            // "Blurriness" (EN), "Borrão" (PT). Fallback: a 1ª prop numérica.
-                            if (pdn === "Blurriness" || pdn === "Borrão" || pdn.toLowerCase().indexOf("blur") >= 0) {
+                            // "Blurriness" (EN), "Desfoque"/"Borrão" (PT), "Desenfoque"
+                            // (ES). Antes so casava "blur", entao num Premiere em
+                            // portugues a propriedade nao era achada e o valor 50
+                            // nunca chegava a ser aplicado.
+                            var pn = _normNomeFx(pdn);
+                            if (pn.indexOf("blur") >= 0 || pn.indexOf("desfoque") >= 0 ||
+                                pn.indexOf("borr") >= 0 || pn.indexOf("desenfoque") >= 0) {
                                 prop.setValue(50, true);
                                 info.log.push("blurriness=50 (" + pdn + ")");
                                 break;

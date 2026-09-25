@@ -4408,7 +4408,10 @@ function _stripJSONFences(s) {
 // (503/UNAVAILABLE, 429/RESOURCE_EXHAUSTED, rede) com backoff — o 503 de "alta
 // demanda" é comum e some na 2ª/3ª tentativa.
 var GEMINI_MAX_ATTEMPTS = 3;   // por modelo (cada tentativa demora ~50s)
-var GEMINI_MAX_MODELOS  = 3;   // quantos modelos diferentes tentar ao todo
+// Quantos modelos diferentes tentar. Com 3 a fila parava nos flash mais novos
+// (3.8 > 3.7 > 3.6) e desistia — num pico de demanda TODOS eles estao ocupados
+// ao mesmo tempo. Com 6 a fila alcanca os "lite" e, no fim, os "pro".
+var GEMINI_MAX_MODELOS  = 6;
 var _geminiModelosCache = null;
 
 // O 429 do Gemini vem com os detalhes do QUE estourou (por minuto? por dia?) e
@@ -4531,7 +4534,8 @@ function _callGemini(systemPrompt, userText, cb, _attempt, _modelo, _tentados) {
 
     function retryOrFail(reason, retryable) {
         if (retryable && attempt < GEMINI_MAX_ATTEMPTS) {
-            var wait = 3000 * attempt; // 3s, 6s
+            // 503 e "pico de demanda": 3s e cedo demais pra adiantar alguma coisa.
+            var wait = 5000 * attempt * attempt; // 5s, 20s
             log("Gemini ocupado (" + reason + ") — re-tentando (" + (attempt + 1) + "/" + GEMINI_MAX_ATTEMPTS + ") em " + (wait / 1000) + "s…", "warn");
             setTimeout(function () { _callGemini(systemPrompt, userText, cb, attempt + 1, modelo, tentados); }, wait);
         } else if (retryable) {
@@ -4629,8 +4633,24 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
     var modeloInicial = _geminiModeloPreferido();
     log("Sem mapeamento na pasta — gerando com o Gemini (" + modeloInicial + ")… pode levar ~30-60s.");
 
+    // Num pico de demanda TODOS os modelos respondem 503 ao mesmo tempo. Em vez
+    // de desistir e deixar o usuario re-tentar na mao, espera e refaz a fila
+    // inteira — pico costuma passar em poucos minutos.
+    var GEMINI_RODADAS = 3, GEMINI_ESPERA_RODADA = 90000;
+    var rodada = 1;
+    function tentarRodada() {
     _callGemini(systemPrompt, userText, function (err, txt, modeloUsado) {
-        if (err) { log("Gemini: " + err, "error"); finish(); return; }
+        if (err) {
+            var picoDeDemanda = /503|high demand|UNAVAILABLE|sobrecarregado/i.test(String(err));
+            if (picoDeDemanda && rodada < GEMINI_RODADAS) {
+                rodada++;
+                log("Gemini: todos os modelos ocupados agora. Nova tentativa em " +
+                    (GEMINI_ESPERA_RODADA / 1000) + "s (rodada " + rodada + "/" + GEMINI_RODADAS + ")…", "warn");
+                setTimeout(tentarRodada, GEMINI_ESPERA_RODADA);
+                return;
+            }
+            log("Gemini: " + err, "error"); finish(); return;
+        }
         if (modeloUsado && modeloUsado !== modeloInicial) log("Gemini: mapeamento gerado por '" + modeloUsado + "' (o modelo anterior estava indisponivel) — passo a usar esse.", "warn");
         var m; try { m = JSON.parse(_stripJSONFences(txt)); } catch (e) { log("Gemini devolveu JSON inválido: " + e.message, "error"); finish(); return; }
 
@@ -4673,6 +4693,8 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
             if (v2.ok >= v.ok) saveAndApply(m2, v2.fails); else saveAndApply(m, v.fails);
         });
     });
+    }
+    tentarRodada();
 }
 
 // Lê um arquivo como texto. Se detectar caracteres de substituição (encoding errado),
