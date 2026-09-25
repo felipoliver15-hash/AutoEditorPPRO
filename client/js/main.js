@@ -4697,6 +4697,44 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
     tentarRodada();
 }
 
+// Nome do produto como ele deve APARECER NA TELA.
+//
+// A convencao esperada e "marca + modelo" (a marca ja vai na linha de cima do
+// card), mas quem monta a lista as vezes despeja a especificacao inteira:
+// "PAF16C Air Fryer 16 Litros" — o texto estoura o layout do card.
+//
+// Regra, deliberadamente conservadora: SO encurta quando o PRIMEIRO pedaco e um
+// codigo de modelo (mistura letra e numero, 3+ caracteres) E ainda sobra texto
+// depois dele. Assim:
+//   "PAF16C Air Fryer 16 Litros"        -> "PAF16C"
+//   "AFON-12L-BG Air Fryer Oven 12 L"   -> "AFON-12L-BG"
+//   "PAF16C"                            -> "PAF16C"  (ja certo, nao mexe)
+//   "Air Fryer Oven Digital 12 Litros"  -> intacto   (nao ha codigo)
+// Nao tenta adivinhar modelo no meio da frase: preferimos deixar o nome inteiro
+// a arriscar cortar no lugar errado.
+function _nomeProdutoNaTela(nome) {
+    var s = String(nome == null ? "" : nome).replace(/^\s+|\s+$/g, "");
+    if (!s) return "";
+    var partes = s.split(/\s+/);
+    if (partes.length < 2) return s;               // uma palavra so: nada a cortar
+
+    function caraDeModelo(p) {                     // tem letra E numero
+        return /[A-Za-z]/.test(p) && /[0-9]/.test(p);
+    }
+
+    var primeiro = partes[0];
+    if (primeiro.length < 3) return s;
+    if (!caraDeModelo(primeiro)) return s;
+
+    // Continua enquanto os pedacos seguintes TAMBEM tiverem cara de modelo
+    // ("Z60 4G", "G10 3D", "A800S E1") e para na primeira palavra comum
+    // ("Air", "Fryer"). Sem isso o 4G/3D — que fazem parte do modelo — eram
+    // cortados junto com as specs.
+    var fim = 1;
+    while (fim < partes.length && caraDeModelo(partes[fim])) fim++;
+    return partes.slice(0, fim).join(" ");
+}
+
 // Lê um arquivo como texto. Se detectar caracteres de substituição (encoding errado),
 // tenta novamente como Windows-1252 — comum quando arquivos são salvos no Bloco de Notas.
 function readTextWithEncodingFallback(file, callback) {
@@ -5050,7 +5088,7 @@ function extractPatchedEGBlobsForProduct(xml, product) {
         ['[[PRODUCT_PRICE_MIN]]', priceNum(product.price_min || product.price)],
         ['[[PRODUCT_PRICE_MAX]]', priceNum(product.price_max || product.price)],
         ['[[PRODUCT_PRICE]]',     priceNum(product.price)],
-        ['[[PRODUCT_NAME]]',      product.name  || ''],
+        ['[[PRODUCT_NAME]]',      _nomeProdutoNaTela(product.name)],
         ['[[PRODUCT_BRAND]]',     product.brand || '']
     ];
 
@@ -5249,7 +5287,7 @@ function patchPrprojForProduct(prprojPath, product, tempSuffix, templateRenames,
         ['[[PRODUCT_PRICE_MIN]]', priceNum(product.price_min || product.price)],
         ['[[PRODUCT_PRICE_MAX]]', priceNum(product.price_max || product.price)],
         ['[[PRODUCT_PRICE]]',     priceNum(product.price)],
-        ['[[PRODUCT_NAME]]',      product.name  || ''],
+        ['[[PRODUCT_NAME]]',      _nomeProdutoNaTela(product.name)],
         ['[[PRODUCT_BRAND]]',     product.brand || '']
     ];
 
@@ -5717,7 +5755,7 @@ function patchTemplateBlobsForProduct(prprojPath, product, blobInfos) {
         '[[PRODUCT_PRICE_MIN]]': priceNum(product.price_min || product.price),
         '[[PRODUCT_PRICE_MAX]]': priceNum(product.price_max || product.price),
         '[[PRODUCT_PRICE]]':     priceNum(product.price),
-        '[[PRODUCT_NAME]]':      product.name  || '',
+        '[[PRODUCT_NAME]]':      _nomeProdutoNaTela(product.name),
         '[[PRODUCT_BRAND]]':     product.brand || ''
     };
 
@@ -6654,7 +6692,7 @@ function buildRecapTimeline(mountProducts, conclusion, startCursor, slotDur, bin
             // Usa o layout de 2 linhas do LOWERTHIRD: INFO (pequena) = marca,
             // SUB-INFO (grande) = nome do modelo.
             var brand = prod.brand || "";
-            var model = prod.name || ((prod.brand ? "" : "Produto"));
+            var model = _nomeProdutoNaTela(prod.name) || ((prod.brand ? "" : "Produto"));
             if (!brand && model) { brand = model; model = ""; } // sem marca: nome na linha pequena
 
             // Transição de entrada
