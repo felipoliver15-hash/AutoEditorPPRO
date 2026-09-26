@@ -5118,13 +5118,27 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
             app.enableQE();
             var qeSeq = qe.project.getActiveSequence();
             var qeTr = qeSeq.getVideoTrackAt(trackIndex);
-            var qeClip = null;
+            // Acha o clip no QE pelo tempo de inicio. A tolerancia aqui era de
+            // 4e9 ticks (~16 ms, meio frame) e pegava o PRIMEIRO que coubesse —
+            // ~60x mais rigida que todas as outras buscas equivalentes do
+            // codigo, que usam 1s e pegam o MAIS PROXIMO. O Premiere encaixa o
+            // clip na fronteira do frame, entao um desvio um pouco maior fazia
+            // a busca falhar ("qeClip nao achado"), o efeito nao era adicionado
+            // e aquele video ficava com borda preta em vez de fundo borrado.
+            var qeClip = null, melhorDD = -1;
             for (var qi = 0; qi < qeTr.numItems; qi++) {
                 var qit = qeTr.getItemAt(qi);
                 if (!qit || !qit.start) continue;
                 try {
-                    if (Math.abs(parseFloat(qit.start.ticks) - targetTicks) < 4e9) { qeClip = qit; break; }
+                    var dd = Math.abs(parseFloat(qit.start.ticks) - targetTicks);
+                    if (melhorDD < 0 || dd < melhorDD) { melhorDD = dd; qeClip = qit; }
                 } catch (eQS) {}
+            }
+            // Mesmo criterio do resto do codigo: aceita se caiu a menos de 1s
+            // (os slots tem pelo menos 5s de distancia entre si).
+            if (qeClip && melhorDD >= TICKS_PER_SECOND) {
+                info.log.push("qeClip mais proximo estava a " + (melhorDD / TICKS_PER_SECOND).toFixed(2) + "s — longe demais");
+                qeClip = null;
             }
             if (qeClip) {
                 var achadoFx = _acharEfeitoDesfoque(info.log);
