@@ -232,6 +232,28 @@ Para CADA produto, a `timeline` é SEMPRE estes 5 itens, nesta ordem:
 - TRANSICAO_2 = transição que entra no produto. As duas TRANSICAO_1 = transição no fim da
   intro e na entrada do preço. NÃO mude templates, tracks nem offsets.
 
+### ⚠️ SE O VÍDEO NÃO MENCIONA PREÇO
+
+Existem canais cujo roteiro **nunca diz um valor** — só mandam conferir o preço no link
+(ex: *"Como os preços mudam bastante durante promoções, abra os links e compare"*).
+
+Nesse caso **NÃO existe `<FRASE_PRECO>`**. Então, para TODOS os produtos:
+
+- **OMITA os 2 últimos itens** da timeline (a `TRANSICAO_1` e o `PRECO` ancorados em
+  `<FRASE_PRECO>`). A timeline fica com **3 itens**, não 5.
+- **Deixe `price_min` e `price_max` como `""`** (string vazia).
+
+**NUNCA invente um preço** nem ancore o card de PRECO numa frase que não fala de preço
+(a frase de fechamento do produto, a comparação do meio, o recap final). Inventar é pior
+do que omitir: entra um card de preço na tela com um número que ninguém falou, e ele
+ainda rouba o espaço do preenchimento de vídeo.
+
+O plugin já trata produto sem PRECO: o preenchimento se estende até o próximo produto, e
+no último produto vai até o CTA/fim da narração.
+
+> Na dúvida, procure na transcrição por "reais", "R$", "dólares", "custa", "sai por",
+> "entre X e Y". Se não houver NENHUMA menção a valor, é este caso.
+
 ## CAMPOS DO PRODUTO
 
 ```json
@@ -594,7 +616,7 @@ inteiro** + a conclusão + os CTAs (os outros 3 produtos seguem o mesmo molde):
 ## CHECKLIST ANTES DE ENTREGAR
 1. **Formato identificado** — sequencial (padrão) ou head-to-head (`global_fill`)?
 2. JSON válido, só o objeto (nada fora dele).
-3. **Sequencial:** 1 produto por item, com os 5 itens FIXOS de timeline. **Head-to-head:** `global_fill` presente com `segments` (sincronizados à narração — NÃO use `interleaved`), produto "container" com os 5 itens FIXOS para o card de intro/preço.
+3. **Sequencial:** 1 produto por item, com os 5 itens FIXOS de timeline — ou **3**, omitindo os ancorados em `<FRASE_PRECO>`, quando o video NAO menciona preco (ver a excecao na ESTRUTURA FIXA). **Head-to-head:** `global_fill` presente com `segments` (sincronizados à narração — NÃO use `interleaved`), produto "container" com os 5 itens FIXOS para o card de intro/preço.
 4. Toda `after_phrase` é um trecho **literal e consecutivo** da transcrição, em ordem cronológica.
    - **Texto EXIBIDO com a grafia CORRETA:** `brand`/`name`/`price` da **LISTA**; termos
      técnicos/siglas/specs (lower thirds, etc.) do **ROTEIRO** (ex: `"TWS"`, não `"CWS"`).

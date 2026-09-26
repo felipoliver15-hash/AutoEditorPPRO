@@ -261,6 +261,15 @@
       <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Copia efeitos e keyframes das sequências <b>[PRESET]ZOOMIN</b> e <b>[PRESET]ZOOMOUT</b> pras imagens de preenchimento, alternando entre elas. Precisa que essas duas sequências existam no projeto, cada uma com um clip onde você aplicou o zoom desejado.</div>
     </div>
 
+    <!-- ── Canais que não falam preço no vídeo ────────────────────────────── -->
+    <div class="section">
+      <label>Preço <span id="sempreco-sigla" style="color:#666"></span></label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-top:6px;cursor:pointer">
+        <input type="checkbox" id="ia-sem-preco"> Este canal não menciona preço no vídeo
+      </label>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Descarta os cards <b>[TEMPLATE]PRECO</b> e deixa o preenchimento cobrir o trecho. Marque quando o roteiro só manda conferir o preço no link — sem isso a IA é <b>obrigada</b> a produzir o card e acaba inventando um valor que ninguém falou. Salvo por sigla de canal.</div>
+    </div>
+
     <div class="section">
       <label>Produtos</label>
       <button id="btn-add-product" class="btn-primary">+ Adicionar Produto</button>

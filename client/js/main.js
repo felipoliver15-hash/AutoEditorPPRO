@@ -1976,6 +1976,32 @@ function _bgmSaveCurrent() {
     saveBgmForSigla(_bgmSigla, pathEl ? pathEl.value : "", volEl ? volEl.value : 15);
 }
 
+// ── "Este canal não menciona preço": salvo POR SIGLA ─────────────────────────
+// O AGENT_PROMPT manda a IA produzir SEMPRE os 5 itens fixos da timeline, e dois
+// deles são ancorados em <FRASE_PRECO>. Num roteiro que nunca diz o preço (só
+// manda conferir no link), ela não tem o que apontar e acaba inventando um valor —
+// entra um card de preço com um número que ninguém falou. Marcado, os cards de
+// PRECO são descartados na montagem e o preenchimento cobre o trecho.
+var SEMPRECO_STORAGE_PREFIX = "autoeditor_sempreco_";   // + SIGLA → "1"
+var _semPrecoSigla = "";
+function getSemPrecoForSigla(sigla) {
+    if (!sigla) return false;
+    try { return localStorage.getItem(SEMPRECO_STORAGE_PREFIX + sigla) === "1"; } catch (e) { return false; }
+}
+// Carrega a preferência da sigla do projeto no checkbox.
+function _semPrecoLoadForProject(prjName) {
+    _semPrecoSigla = _projectSigla(prjName);
+    var el = document.getElementById("ia-sem-preco");
+    if (el) el.checked = getSemPrecoForSigla(_semPrecoSigla);
+    var s = document.getElementById("sempreco-sigla");
+    if (s) s.textContent = _semPrecoSigla ? "(" + _semPrecoSigla + ")" : "";
+}
+// Estado atual: o checkbox manda; sem UI, cai no que está salvo pra sigla.
+function _semPrecoAtivo() {
+    var el = document.getElementById("ia-sem-preco");
+    return el ? !!el.checked : getSemPrecoForSigla(_semPrecoSigla);
+}
+
 // Gera a trilha de fundo (ffmpeg: loop até cobrir o vídeo + volume + fade-out) e
 // insere na faixa A2 da timeline. Chamado no fim da montagem. No-op se não houver
 // música salva pra sigla. Volume é % linear (15% ≈ -16 dB).
@@ -3446,6 +3472,16 @@ function initIA() {
         });
     }
 
+    var semPrecoChk = document.getElementById("ia-sem-preco");
+    if (semPrecoChk) {
+        semPrecoChk.addEventListener("change", function () {
+            if (!_semPrecoSigla) { log("Sem preço: salve o projeto primeiro (preciso da sigla do canal).", "warn"); return; }
+            try { localStorage.setItem(SEMPRECO_STORAGE_PREFIX + _semPrecoSigla, semPrecoChk.checked ? "1" : "0"); } catch (e) {}
+            log("Sem preço (" + _semPrecoSigla + "): " +
+                (semPrecoChk.checked ? "ON — os cards de PRECO não entram" : "OFF"), "info");
+        });
+    }
+
     btnTest.addEventListener("click", testGeminiConnection);
     btnGen.addEventListener("click", function() { generateAllImages(false); });
     btnGenM.addEventListener("click", function() { generateAllImages(true); });
@@ -4134,6 +4170,7 @@ function _watchProjectChanges() {
             } catch (eGP) {}
             // Música de fundo por sigla (deriva o nome do projeto do caminho do .prproj).
             try { _bgmLoadForProject(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eBg) {}
+            try { _semPrecoLoadForProject(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eSP) {}
             // Perfil de API por sigla do canal (ver módulo PERFIS DE API).
             try { _apiAoAbrirProjeto(path.replace(/^.*[\\\/]/, "").replace(/\.[^.]+$/, "")); } catch (eApi) {}
 
@@ -6095,6 +6132,23 @@ function mountVideo() {
 
 // Modo IA: query duração dos templates → gera slots auto-fill entre PRODUTO e PRECO
 function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
+    // Canal que não fala preço: descarta os cards de PRECO antes de qualquer
+    // medição. O auto-fill já tem o caminho pra produto sem PRECO (preenche até o
+    // próximo produto), e a cauda do último se ancora no fim do preenchimento —
+    // então basta sumir com os itens, nada mais precisa saber disso.
+    if (_semPrecoAtivo()) {
+        var _nSemPreco = 0;
+        mountProducts.forEach(function (p) {
+            p.timeline = (p.timeline || []).filter(function (it) {
+                var ehPreco = (it.type === "template_insert" && it.template &&
+                               it.template.toUpperCase().indexOf("PRECO") >= 0);
+                if (ehPreco) _nSemPreco++;
+                return !ehPreco;
+            });
+        });
+        log("Sem preço: " + _nSemPreco + " card(s) de PRECO descartado(s) — o preenchimento cobre o trecho.",
+            _nSemPreco ? "ok" : "info");
+    }
     // Coleta nomes únicos dos templates usados
     var templateNames = {};
     mountProducts.forEach(function(p) {
@@ -6458,15 +6512,28 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     it.template.toUpperCase().indexOf("PRECO") >= 0 && it.time_seconds !== undefined) precoU = it;
             });
             var temMidiaU = bmU && ((bmU.images && bmU.images.length) || (bmU.videos && bmU.videos.length));
-            if (!precoU || !temMidiaU) {
-                log("cauda: pulada — " + (!precoU ? "o último produto não tem card de PRECO posicionado"
-                                                  : "o bin do último produto está vazio"), "warn");
-            } else {
-                var trackU      = precoU.track || 1;
-                var precoStartU = precoU.time_seconds + (precoU.offset_seconds || 0);
-                var contentU    = contentDurations[precoU.template] || durations[precoU.template] || 5;
+            var trackU    = precoU ? (precoU.track || 1) : 1;
+            // Onde a cauda começa: depois do card de preço quando ele existe; quando o
+            // canal não fala preço (checkbox "sem preço"), depois do preenchimento do
+            // próprio produto. Os itens de recap não contam aqui — eles JÁ são a cauda.
+            var contentU  = 0, iniCaudaU = null;
+            if (precoU) {
+                contentU  = contentDurations[precoU.template] || durations[precoU.template] || 5;
                 if (contentU > PRECO_MAX_CAUDA) contentU = PRECO_MAX_CAUDA;  // mesmo teto do host
-                var iniCaudaU   = precoStartU + contentU;
+                iniCaudaU = precoU.time_seconds + (precoU.offset_seconds || 0) + contentU;
+            } else {
+                (ultProd.timeline || []).forEach(function (it) {
+                    if (it._recap || it.time_seconds == null || (it.track || 1) !== trackU) return;
+                    var d = it.duration;
+                    if (!(d > 0)) d = contentDurations[it.template] || durations[it.template] || 0;
+                    var fim = it.time_seconds + (d > 0 ? d : 0);
+                    if (iniCaudaU === null || fim > iniCaudaU) iniCaudaU = fim;
+                });
+            }
+            if (!temMidiaU || iniCaudaU === null) {
+                log("cauda: pulada — " + (!temMidiaU ? "o bin do último produto está vazio"
+                                                     : "o último produto não tem nada posicionado na track " + trackU), "warn");
+            } else {
 
                 // Fim da cauda: o CTA depois do preço (dali o stock do CTA assume),
                 // senão o fim da narração.
