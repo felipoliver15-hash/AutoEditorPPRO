@@ -7613,6 +7613,22 @@ function _apiInit() {
         _apiRenderizar();
     });
 
+    // Botao de olho: revela a chave sem precisar apagar pra conferir. Alterna
+    // entre password e text no campo apontado por data-alvo.
+    var olhos = document.querySelectorAll(".btn-ver-chave");
+    for (var o = 0; o < olhos.length; o++) {
+        (function (btn) {
+            btn.addEventListener("click", function () {
+                var alvo = document.getElementById(btn.getAttribute("data-alvo"));
+                if (!alvo) return;
+                var escondido = (alvo.type === "password");
+                alvo.type = escondido ? "text" : "password";
+                btn.textContent = escondido ? "\uD83D\uDE48" : "\uD83D\uDC41";
+                btn.title = escondido ? "Ocultar" : "Mostrar";
+            });
+        })(olhos[o]);
+    }
+
     var ids = ["api-drive-key", "api-drive-root", "api-gemini-key"];
     for (var i = 0; i < ids.length; i++) {
         var el = document.getElementById(ids[i]);
