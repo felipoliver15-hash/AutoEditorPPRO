@@ -155,6 +155,25 @@ function _fimDaNarracao() {
 
 // Gera os itens que preenchem [t0, t1) com a mídia do bin de um produto: imagens em
 // slots fixos quando existem, senão as janelas dos vídeos em loop.
+// Devolve os trechos LIVRES de [ini, fim) depois de descontar os intervalos ja
+// ocupados — [[inicio, fim], ...], em segundos. Usado pra preencher so o vazio da
+// cauda, sem atropelar o que ja esta na track (recap, pontos-chave).
+// Os intervalos podem vir fora de ordem e podem se sobrepor.
+function _buracosNaJanela(ocupado, ini, fim) {
+    var livres = [], cursor = ini;
+    var ivs = (ocupado || []).slice().sort(function (a, b) { return a[0] - b[0]; });
+    for (var i = 0; i < ivs.length; i++) {
+        var a0 = ivs[i][0], a1 = ivs[i][1];
+        if (a1 <= cursor) continue;      // ja passou / contido no que foi consumido
+        if (a0 >= fim) break;            // daqui pra frente e tudo fora da janela
+        if (a0 > cursor) livres.push([cursor, Math.min(a0, fim)]);
+        cursor = a1;
+        if (cursor >= fim) break;
+    }
+    if (cursor < fim) livres.push([cursor, fim]);
+    return livres;
+}
+
 function _postPrecoFillItems(bm, t0, t1, track, slotDur) {
     var out = [];
     if (!bm) return out;
@@ -6426,6 +6445,10 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
         // obstáculo real: o CTA, o começo do recap, ou o fim da narração.
         // O recap entra ANTES deste bloco de propósito — ele ancora na narração e não
         // pode ser atropelado pelo preenchimento.
+        // Preenche TODOS os buracos da cauda na track do preço, em vez de parar no
+        // primeiro obstáculo: assim o recap (que ancora na narração) fica intacto e o
+        // vazio ENTRE os itens do recap também some. Loga o motivo quando não preenche —
+        // a primeira versão saía calada e não dava pra saber por que o buraco continuou.
         if (!globalFillActive && mountProducts.length) {
             var ultProd = mountProducts[mountProducts.length - 1];
             var bmU     = binMedia[String(ultProd.folder)];
@@ -6435,32 +6458,54 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     it.template.toUpperCase().indexOf("PRECO") >= 0 && it.time_seconds !== undefined) precoU = it;
             });
             var temMidiaU = bmU && ((bmU.images && bmU.images.length) || (bmU.videos && bmU.videos.length));
-            if (precoU && temMidiaU) {
+            if (!precoU || !temMidiaU) {
+                log("cauda: pulada — " + (!precoU ? "o último produto não tem card de PRECO posicionado"
+                                                  : "o bin do último produto está vazio"), "warn");
+            } else {
+                var trackU      = precoU.track || 1;
                 var precoStartU = precoU.time_seconds + (precoU.offset_seconds || 0);
+                var contentU    = contentDurations[precoU.template] || durations[precoU.template] || 5;
+                if (contentU > PRECO_MAX_CAUDA) contentU = PRECO_MAX_CAUDA;  // mesmo teto do host
+                var iniCaudaU   = precoStartU + contentU;
 
+                // Fim da cauda: o CTA depois do preço (dali o stock do CTA assume),
+                // senão o fim da narração.
                 var fimCaudaU = null;
                 for (var cu = 0; cu < ctaStarts.length; cu++) {
-                    if (ctaStarts[cu] > precoStartU + 0.05 &&
+                    if (ctaStarts[cu] > iniCaudaU + 0.05 &&
                         (fimCaudaU === null || ctaStarts[cu] < fimCaudaU)) fimCaudaU = ctaStarts[cu];
                 }
-                (ultProd.timeline || []).forEach(function (it) {
-                    if (!it._recap || it.time_seconds == null) return;
-                    if (it.time_seconds > precoStartU + 0.05 &&
-                        (fimCaudaU === null || it.time_seconds < fimCaudaU)) fimCaudaU = it.time_seconds;
-                });
                 if (fimCaudaU === null) fimCaudaU = _fimDaNarracao();
 
-                var contentU = contentDurations[precoU.template] || durations[precoU.template] || 5;
-                if (contentU > PRECO_MAX_CAUDA) contentU = PRECO_MAX_CAUDA;  // mesmo teto do host
-                var iniCaudaU = precoStartU + contentU;
+                if (fimCaudaU === null || fimCaudaU - iniCaudaU < 0.5) {
+                    log("cauda: nada a preencher — preço termina em " + iniCaudaU.toFixed(1) + "s e a cauda vai até " +
+                        (fimCaudaU === null ? "??? (sem CTA e sem transcrição)" : fimCaudaU.toFixed(1) + "s"), "info");
+                } else {
+                    // O que JÁ ocupa a track do preço dentro da janela (recap etc).
+                    var ocupadoU = [];
+                    (ultProd.timeline || []).forEach(function (it) {
+                        if (it.time_seconds == null || (it.track || 1) !== trackU) return;
+                        var d = (it === precoU) ? contentU : it.duration;
+                        if (!(d > 0)) d = contentDurations[it.template] || durations[it.template] || 0;
+                        if (d > 0) ocupadoU.push([it.time_seconds, it.time_seconds + d]);
+                    });
 
-                if (fimCaudaU !== null && fimCaudaU - iniCaudaU >= 0.5) {
-                    var itensU = _postPrecoFillItems(bmU, iniCaudaU, fimCaudaU, precoU.track || 1, slotDur);
+                    var buracosU = _buracosNaJanela(ocupadoU, iniCaudaU, fimCaudaU);
+
+                    var itensU = [], preenchidosU = 0;
+                    buracosU.forEach(function (b) {
+                        if (b[1] - b[0] < 0.5) return;
+                        var g = _postPrecoFillItems(bmU, b[0], b[1], trackU, slotDur);
+                        if (g.length) { itensU = itensU.concat(g); preenchidosU++; }
+                    });
                     if (itensU.length) {
                         ultProd.timeline = (ultProd.timeline || []).concat(itensU);
                         ultProd.timeline.sort(function (a, b) { return (a.time_seconds || 0) - (b.time_seconds || 0); });
-                        log("p" + mountProducts.length + ": cauda pós-PRECO " + itensU.length +
-                            " item(ns) [" + iniCaudaU.toFixed(1) + "s→" + fimCaudaU.toFixed(1) + "s]", "ok");
+                        log("cauda pós-PRECO: " + itensU.length + " item(ns) em " + preenchidosU + " buraco(s) [" +
+                            iniCaudaU.toFixed(1) + "s→" + fimCaudaU.toFixed(1) + "s]", "ok");
+                    } else {
+                        log("cauda: janela [" + iniCaudaU.toFixed(1) + "s→" + fimCaudaU.toFixed(1) + "s] já coberta por " +
+                            ocupadoU.length + " item(ns) na track " + trackU, "info");
                     }
                 }
             }
