@@ -264,10 +264,12 @@
     <!-- ── Canais que não falam preço no vídeo ────────────────────────────── -->
     <div class="section">
       <label>Preço <span id="sempreco-sigla" style="color:#666"></span></label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-top:6px;cursor:pointer">
-        <input type="checkbox" id="ia-sem-preco"> Este canal não menciona preço no vídeo
-      </label>
-      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Descarta os cards <b>[TEMPLATE]PRECO</b> e deixa o preenchimento cobrir o trecho. Marque quando o roteiro só manda conferir o preço no link — sem isso a IA é <b>obrigada</b> a produzir o card e acaba inventando um valor que ninguém falou. Salvo por sigla de canal.</div>
+      <select id="ia-preco-modo" style="width:100%;box-sizing:border-box;margin-top:6px;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+        <option value="auto">Detectar pela narração (padrão)</option>
+        <option value="nunca">Este canal nunca fala preço — sempre pular o card</option>
+        <option value="sempre">Sempre usar o card de preço</option>
+      </select>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">No <b>automático</b>, o plugin procura um <b>valor em dinheiro</b> na transcrição (“reais”, “R$”, “dólares”). Se a narração só manda conferir o preço no link, os cards <b>[TEMPLATE]PRECO</b> são descartados e o preenchimento cobre o trecho — senão a IA é <b>obrigada</b> a produzir o card e acaba inventando um valor que ninguém falou. Salvo por sigla de canal.</div>
     </div>
 
     <div class="section">

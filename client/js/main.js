@@ -1982,24 +1982,57 @@ function _bgmSaveCurrent() {
 // manda conferir no link), ela não tem o que apontar e acaba inventando um valor —
 // entra um card de preço com um número que ninguém falou. Marcado, os cards de
 // PRECO são descartados na montagem e o preenchimento cobre o trecho.
-var SEMPRECO_STORAGE_PREFIX = "autoeditor_sempreco_";   // + SIGLA → "1"
+var SEMPRECO_STORAGE_PREFIX = "autoeditor_sempreco_";   // + SIGLA → "auto"|"nunca"|"sempre"
 var _semPrecoSigla = "";
-function getSemPrecoForSigla(sigla) {
-    if (!sigla) return false;
-    try { return localStorage.getItem(SEMPRECO_STORAGE_PREFIX + sigla) === "1"; } catch (e) { return false; }
+// "auto" (padrão) decide pela narração; "nunca"/"sempre" forçam.
+function getPrecoModoForSigla(sigla) {
+    if (!sigla) return "auto";
+    var v = null;
+    try { v = localStorage.getItem(SEMPRECO_STORAGE_PREFIX + sigla); } catch (e) {}
+    if (v === "1") return "nunca";    // migra do checkbox antigo
+    if (v === "0") return "sempre";
+    return (v === "nunca" || v === "sempre") ? v : "auto";
 }
-// Carrega a preferência da sigla do projeto no checkbox.
+
+// Tokens de VALOR em dinheiro. NÃO dá pra procurar a palavra "preço": roteiro que
+// não diz valor nenhum ainda fala "confira os preços atualizados", "os preços mudam
+// durante promoções". E contar número também não serve — "doze litros", "duzentos
+// graus", "mil e oitocentos watts". O que separa os dois casos é a MOEDA ser dita.
+var _PRECO_TOKENS = {
+    pt: /(\breais\b|\br\$|\bum real\b)/,
+    en: /(\bdollars?\b|\bbucks\b|\busd\b|\$\s*\d)/
+};
+// A narração chega a dizer algum valor em dinheiro?
+// null = não dá pra saber (sem transcrição carregada).
+function _narracaoTemPreco() {
+    if (!transcriptWords.length) return null;
+    var txt = [];
+    for (var i = 0; i < transcriptWords.length; i++) {
+        var w = transcriptWords[i];
+        txt.push(w.raw != null ? w.raw : (w.text || ""));
+    }
+    var s = accentFold(txt.join(" ")).toLowerCase();
+    var lang = (loadedJSON && loadedJSON.language === "en") ? "en" : "pt";
+    return _PRECO_TOKENS[lang].test(s);
+}
+// Carrega a preferência da sigla do projeto no seletor.
 function _semPrecoLoadForProject(prjName) {
     _semPrecoSigla = _projectSigla(prjName);
-    var el = document.getElementById("ia-sem-preco");
-    if (el) el.checked = getSemPrecoForSigla(_semPrecoSigla);
+    var el = document.getElementById("ia-preco-modo");
+    if (el) el.value = getPrecoModoForSigla(_semPrecoSigla);
     var s = document.getElementById("sempreco-sigla");
     if (s) s.textContent = _semPrecoSigla ? "(" + _semPrecoSigla + ")" : "";
 }
-// Estado atual: o checkbox manda; sem UI, cai no que está salvo pra sigla.
+// Os cards de PRECO devem ser descartados nesta montagem?
 function _semPrecoAtivo() {
-    var el = document.getElementById("ia-sem-preco");
-    return el ? !!el.checked : getSemPrecoForSigla(_semPrecoSigla);
+    var el = document.getElementById("ia-preco-modo");
+    var modo = el ? el.value : getPrecoModoForSigla(_semPrecoSigla);
+    if (modo === "nunca")  { log("Preço: modo \"sempre pular\" — os cards de PRECO não entram.", "info"); return true; }
+    if (modo === "sempre") return false;
+    var tem = _narracaoTemPreco();
+    if (tem === null) return false;   // sem transcrição: não adivinha, mantém o card
+    if (!tem) log("Preço: nenhum valor em dinheiro na narração (\"reais\"/\"R$\") — descartando os cards de PRECO.", "ok");
+    return !tem;
 }
 
 // Gera a trilha de fundo (ffmpeg: loop até cobrir o vídeo + volume + fade-out) e
@@ -3472,13 +3505,16 @@ function initIA() {
         });
     }
 
-    var semPrecoChk = document.getElementById("ia-sem-preco");
-    if (semPrecoChk) {
-        semPrecoChk.addEventListener("change", function () {
-            if (!_semPrecoSigla) { log("Sem preço: salve o projeto primeiro (preciso da sigla do canal).", "warn"); return; }
-            try { localStorage.setItem(SEMPRECO_STORAGE_PREFIX + _semPrecoSigla, semPrecoChk.checked ? "1" : "0"); } catch (e) {}
-            log("Sem preço (" + _semPrecoSigla + "): " +
-                (semPrecoChk.checked ? "ON — os cards de PRECO não entram" : "OFF"), "info");
+    var precoModoEl = document.getElementById("ia-preco-modo");
+    if (precoModoEl) {
+        precoModoEl.addEventListener("change", function () {
+            if (!_semPrecoSigla) { log("Preço: salve o projeto primeiro (preciso da sigla do canal).", "warn"); return; }
+            try { localStorage.setItem(SEMPRECO_STORAGE_PREFIX + _semPrecoSigla, precoModoEl.value); } catch (e) {}
+            log("Preço (" + _semPrecoSigla + "): " + ({
+                auto:   "automático — decide pela narração",
+                nunca:  "sempre pular o card de preço",
+                sempre: "sempre usar o card de preço"
+            }[precoModoEl.value] || precoModoEl.value), "info");
         });
     }
 
