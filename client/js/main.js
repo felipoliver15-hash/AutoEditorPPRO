@@ -139,6 +139,65 @@ function formatPriceByLang(val, lang) {
 //   - senão (nada marcado) → o vídeo inteiro.
 // Cada janela: { name, path, winStart, winLen, key }. O global_fill/sequencial
 // ciclam entre as janelas como se fossem clipes separados.
+// Teto de quanto o card de PRECO pode ficar na tela quando NÃO há próximo produto
+// pra limitá-lo (último produto). A reserva de conteúdo do [TEMPLATE]PRECO é longa
+// de propósito, então sem esse teto a cauda inteira do vídeo virava um card parado.
+// O host aplica o mesmo valor — se mudar aqui, mude lá também.
+var PRECO_MAX_CAUDA = 20;
+
+// Último instante com narração (fim da última palavra da transcrição).
+function _fimDaNarracao() {
+    if (!transcriptWords.length) return null;
+    var u = transcriptWords[transcriptWords.length - 1];
+    var t = (u.end != null) ? u.end : u.start;
+    return (typeof t === "number") ? t : null;
+}
+
+// Gera os itens que preenchem [t0, t1) com a mídia do bin de um produto: imagens em
+// slots fixos quando existem, senão as janelas dos vídeos em loop.
+function _postPrecoFillItems(bm, t0, t1, track, slotDur) {
+    var out = [];
+    if (!bm) return out;
+    if (bm.images && bm.images.length) {
+        // Caminho normal: loop de imagens em slots fixos.
+        var nImgs  = bm.images.length;
+        var nSlots = Math.ceil((t1 - t0) / slotDur);
+        for (var k = 0; k < nSlots; k++) {
+            var a = t0 + k * slotDur;
+            var b = Math.min(a + slotDur, t1);
+            if (b - a < 0.2) break;
+            var img = bm.images[k % nImgs];
+            out.push({
+                type: "product_image", bin_name: img.name,
+                bin_path: img.path || null,
+                time_seconds: a, duration: b - a, animation: "none",
+                track: track, _autofill: true, _postpreco: true,
+                _zoomPreset: (k % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
+            });
+        }
+    } else if (bm.videos && bm.videos.length) {
+        // Bin só tem vídeos — faz loop das JANELAS (regiões/in-out) pra cobrir o gap.
+        var vwins   = bm.videos.reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []);
+        var cur     = t0;
+        var loopIdx = 0;
+        var safety  = (vwins.length || 1) * 50;
+        while (cur < t1 - 0.2 && safety-- > 0 && vwins.length) {
+            var pv  = vwins[loopIdx % vwins.length];
+            var dur = pv.winLen || 0;
+            if (!(dur > 0)) { loopIdx++; continue; }
+            out.push({
+                type: "product_video", bin_name: pv.name,
+                bin_path: pv.path || null,
+                time_seconds: cur, duration: Math.min(dur, t1 - cur), track: track,
+                _autofill: true, _postpreco: true,
+                win_start: pv.winStart, win_len: dur
+            });
+            cur += dur; loopIdx++;
+        }
+    }
+    return out;
+}
+
 function _videoWindows(v) {
     var name = v.name, path = v.path || null;
     if (v.regions && v.regions.length) {
@@ -6322,45 +6381,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             if (gapPF < 0.5) continue; // PRECO cobre o gap todo
 
             var trackA  = precoA.track || 1;
-            var fillItems = [];
-            if (bmA.images && bmA.images.length) {
-                // Caminho normal: loop de imagens em slots fixos.
-                var nImgsA  = bmA.images.length;
-                var nSlotsPF = Math.ceil(gapPF / slotDur);
-                for (var kf = 0; kf < nSlotsPF; kf++) {
-                    var ft0 = stretchEnd + kf * slotDur;
-                    var ft1 = Math.min(ft0 + slotDur, nextStartPF);
-                    if (ft1 - ft0 < 0.2) break;
-                    var imgEntryPF = bmA.images[kf % nImgsA];
-                    fillItems.push({
-                        type: "product_image", bin_name: imgEntryPF.name,
-                        bin_path: imgEntryPF.path || null,
-                        time_seconds: ft0, duration: ft1 - ft0, animation: "none",
-                        track: trackA, _autofill: true, _postpreco: true,
-                        _zoomPreset: (kf % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
-                    });
-                }
-            } else {
-                // Bin só tem vídeos — faz loop das JANELAS (regiões/in-out) pra cobrir o gap.
-                var vwinsPF = bmA.videos.reduce(function (acc, v) { return acc.concat(_videoWindows(v)); }, []);
-                var vcurPF = stretchEnd;
-                var loopIdxPF = 0;
-                var safetyPF = (vwinsPF.length || 1) * 50;
-                while (vcurPF < nextStartPF - 0.2 && safetyPF-- > 0 && vwinsPF.length) {
-                    var pv = vwinsPF[loopIdxPF % vwinsPF.length];
-                    var pvdur = pv.winLen || 0;
-                    if (!(pvdur > 0)) { loopIdxPF++; continue; }
-                    var thisDurPF = Math.min(pvdur, nextStartPF - vcurPF);
-                    fillItems.push({
-                        type: "product_video", bin_name: pv.name,
-                        bin_path: pv.path || null,
-                        time_seconds: vcurPF, duration: thisDurPF, track: trackA,
-                        _autofill: true, _postpreco: true,
-                        win_start: pv.winStart, win_len: pvdur
-                    });
-                    vcurPF += pvdur; loopIdxPF++;
-                }
-            }
+            var fillItems = _postPrecoFillItems(bmA, stretchEnd, nextStartPF, trackA, slotDur);
             if (fillItems.length) {
                 prodA.timeline = prodA.timeline.concat(fillItems);
                 prodA.timeline.sort(function (a, b) { return (a.time_seconds || 0) - (b.time_seconds || 0); });
@@ -6390,6 +6411,58 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                 lastProd.timeline = (lastProd.timeline || []).concat(recapItems);
                 lastProd.timeline.sort(function (a, b) { return (a.time_seconds || 0) - (b.time_seconds || 0); });
                 log("Recap: " + recapItems.length + " item(s) inserido(s) no final do vídeo.", "ok");
+            }
+        }
+
+        // ── CAUDA DO ÚLTIMO PRODUTO ───────────────────────────────────────────
+        // O pós-PRECO acima só roda ENTRE produtos: ele precisa do card PRODUTO
+        // seguinte pra fechar a janela. No ÚLTIMO produto não existe "próximo", então
+        // nada limitava o esticamento do PRECO a não ser a reserva de conteúdo do
+        // [TEMPLATE]PRECO — que é longa de propósito (dezenas de segundos). Num roteiro
+        // que recapitula os produtos no fim, a conclusão pode ser 30% do vídeo, e o card
+        // de preço ficava PARADO por quase um minuto em cima dessa narração.
+        //
+        // Aqui preenchemos de (fim do PRECO, já com o teto aplicado) até o primeiro
+        // obstáculo real: o CTA, o começo do recap, ou o fim da narração.
+        // O recap entra ANTES deste bloco de propósito — ele ancora na narração e não
+        // pode ser atropelado pelo preenchimento.
+        if (!globalFillActive && mountProducts.length) {
+            var ultProd = mountProducts[mountProducts.length - 1];
+            var bmU     = binMedia[String(ultProd.folder)];
+            var precoU  = null;
+            (ultProd.timeline || []).forEach(function (it) {
+                if (it.type === "template_insert" && it.template &&
+                    it.template.toUpperCase().indexOf("PRECO") >= 0 && it.time_seconds !== undefined) precoU = it;
+            });
+            var temMidiaU = bmU && ((bmU.images && bmU.images.length) || (bmU.videos && bmU.videos.length));
+            if (precoU && temMidiaU) {
+                var precoStartU = precoU.time_seconds + (precoU.offset_seconds || 0);
+
+                var fimCaudaU = null;
+                for (var cu = 0; cu < ctaStarts.length; cu++) {
+                    if (ctaStarts[cu] > precoStartU + 0.05 &&
+                        (fimCaudaU === null || ctaStarts[cu] < fimCaudaU)) fimCaudaU = ctaStarts[cu];
+                }
+                (ultProd.timeline || []).forEach(function (it) {
+                    if (!it._recap || it.time_seconds == null) return;
+                    if (it.time_seconds > precoStartU + 0.05 &&
+                        (fimCaudaU === null || it.time_seconds < fimCaudaU)) fimCaudaU = it.time_seconds;
+                });
+                if (fimCaudaU === null) fimCaudaU = _fimDaNarracao();
+
+                var contentU = contentDurations[precoU.template] || durations[precoU.template] || 5;
+                if (contentU > PRECO_MAX_CAUDA) contentU = PRECO_MAX_CAUDA;  // mesmo teto do host
+                var iniCaudaU = precoStartU + contentU;
+
+                if (fimCaudaU !== null && fimCaudaU - iniCaudaU >= 0.5) {
+                    var itensU = _postPrecoFillItems(bmU, iniCaudaU, fimCaudaU, precoU.track || 1, slotDur);
+                    if (itensU.length) {
+                        ultProd.timeline = (ultProd.timeline || []).concat(itensU);
+                        ultProd.timeline.sort(function (a, b) { return (a.time_seconds || 0) - (b.time_seconds || 0); });
+                        log("p" + mountProducts.length + ": cauda pós-PRECO " + itensU.length +
+                            " item(ns) [" + iniCaudaU.toFixed(1) + "s→" + fimCaudaU.toFixed(1) + "s]", "ok");
+                    }
+                }
             }
         }
 

@@ -5832,6 +5832,11 @@ function clampLowerThirdsToPrice(seq, products) {
     return log;
 }
 
+// Teto de quanto o card de PRECO pode ficar na tela quando NÃO há próximo produto pra
+// limitá-lo (último produto). O cliente (main.js, PRECO_MAX_CAUDA) usa o mesmo valor
+// pra saber de onde começar a preencher a cauda — se mudar aqui, mude lá também.
+var PRECO_MAX_CAUDA_SEC = 20;
+
 function stretchPrecoToNextProduct(seq, products, ctaStarts) {
     var log = [];
     try {
@@ -5870,10 +5875,11 @@ function stretchPrecoToNextProduct(seq, products, ctaStarts) {
                 }
             }
             // ÚLTIMO produto (ou sem próximo PRODUTO): não há "próximo" pra limitar.
-            // Usa um limite grande → o CTA seguinte (se houver) ou o teto do conteúdo
-            // do PRECO é que vão limitar o esticamento. Antes o último era PULADO,
-            // então o preço dele ficava cortado na duração fixa do template.
-            if (nextStart === null) nextStart = precoSec + precoContentDur + 600;
+            // Usa um limite grande → o CTA seguinte (se houver) ou o teto da cauda
+            // (PRECO_MAX_CAUDA_SEC) é que vão limitar o esticamento. Antes o último era
+            // PULADO, então o preço dele ficava cortado na duração fixa do template.
+            var semProximo = (nextStart === null);
+            if (semProximo) nextStart = precoSec + precoContentDur + 600;
 
             var clip = findClipByNameNearStart(seq, "PRECO", precoSec, 0.6);
             if (!clip) {
@@ -5898,6 +5904,16 @@ function stretchPrecoToNextProduct(seq, products, ctaStarts) {
             var curEndSec = 0;
             try { curEndSec = parseFloat(clip.end.ticks) / TICKS_PER_SECOND; } catch (eCe) {}
             var maxEndSec = precoSec + precoContentDur;
+            // Sem próximo produto, o único limite seria a reserva de conteúdo do
+            // [TEMPLATE]PRECO — que é longa de propósito (dezenas de segundos). Num
+            // roteiro que recapitula os produtos no fim, a conclusão pode ser 30% do
+            // vídeo, e o card de preço ficava PARADO por quase um minuto em cima dela.
+            // Teto aqui; o cliente preenche o resto da cauda com B-roll do produto.
+            var caudaLimitada = false;
+            if (semProximo && maxEndSec > precoSec + PRECO_MAX_CAUDA_SEC) {
+                maxEndSec = precoSec + PRECO_MAX_CAUDA_SEC;
+                caudaLimitada = true;
+            }
             // Se tem um CTA entre o PRECO e o próximo produto, o PRECO PARA no CTA
             // (o stock do CTA assume dali até o próximo produto).
             var cta = nearestCtaBetween(precoSec, nextStart);
@@ -5922,7 +5938,8 @@ function stretchPrecoToNextProduct(seq, products, ctaStarts) {
                     var gapLeft = limit - newEndSec;
                     log.push("p" + (p + 1) + ": PRECO " + curEndSec.toFixed(2) + "s → " + newEndSec.toFixed(2) +
                              "s (alvo " + limit.toFixed(2) + "s" + (cta !== null ? " [CTA]" : " [próx produto]") +
-                             (gapLeft > 0.1 && cta === null ? ("; AINDA sobra " + gapLeft.toFixed(2) + "s — aumente a reserva do [TEMPLATE]PRECO") : "") + ")");
+                             (caudaLimitada ? ("; teto da cauda em " + PRECO_MAX_CAUDA_SEC + "s — o resto vira B-roll do produto") : "") +
+                             (gapLeft > 0.1 && cta === null && !caudaLimitada ? ("; AINDA sobra " + gapLeft.toFixed(2) + "s — aumente a reserva do [TEMPLATE]PRECO") : "") + ")");
                 } catch (eExt) {
                     log.push("p" + (p + 1) + ": falha ao esticar PRECO: " + eExt.message);
                 }
