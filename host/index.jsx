@@ -6388,7 +6388,9 @@ function renameActiveSequenceToProject(target) {
             return JSON.stringify({ renamed: false, reason: "já está com esse nome", from: atual, to: target });
         }
 
-        var conv = /^\s*[A-Za-z]+\s*[-_ ]*\d+\s*$/;
+        // A sigla pode ter digito ("5M 00", "M5 00") — exige apenas que tenha
+        // ao menos UMA letra, senao "00 12" passaria como se fosse convenção.
+        var conv = /^\s*[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*\s*[-_ ]*\d+\s*$/;
         if (!conv.test(atual)) {
             return JSON.stringify({ renamed: false, reason: "nome fora da convenção — não mexi", from: atual, to: target });
         }

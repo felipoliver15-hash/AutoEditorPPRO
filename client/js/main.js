@@ -1827,18 +1827,43 @@ var DRIVE_KEY_STORAGE  = "autoeditor_drive_apikey";
 var DRIVE_ROOT_STORAGE = "autoeditor_drive_root";   // pasta-raiz (todos os canais)
 var DRIVE_AUTO_STORAGE = "autoeditor_drive_auto";   // "1" = importa ao abrir o projeto
 
+// Separa um nome na convenção SIGLA + NÚMERO: "MT 116", "FC - 01", "5M 16".
+//
+// A chave é o NÚMERO do vídeo: ele é sempre só dígitos e vem no FIM. A sigla
+// é todo o resto — e ela PODE conter dígito ("5M", "M5").
+//
+// Antes a sigla era lida como "as letras iniciais", então "5M 16" virava sigla
+// "M" (o 5 sumia) e "M5 16" virava sigla "M" + número 5, ignorando o 16. O
+// efeito colateral perigoso: dois canais diferentes ("5M" e "3M") passavam a
+// compartilhar o mesmo perfil de API e a mesma música de fundo, sem aviso.
+//
+// Devolve { sigla, numero, numeroTexto } ou null quando o nome não segue a
+// convenção (ex. o nome de um canal, "Auto Tech").
+function _partesProjeto(name) {
+    var m = String(name == null ? "" : name).match(/^\s*(.+?)\s*[-_ ]*(\d+)\s*$/);
+    if (!m) return null;
+    var sigla = m[1].replace(/[-_ ]+$/, "");
+    if (!/[A-Za-z]/.test(sigla)) return null;   // a sigla precisa ter ao menos uma letra
+    return { sigla: sigla.toUpperCase(), numero: parseInt(m[2], 10), numeroTexto: m[2] };
+}
+
 // Normaliza um nome (projeto ou pasta) numa chave SIGLA+NÚMERO comparável:
 // "AT 05", "AT - 5", "AT-05", "ATC 03" → "AT5"/"AT5"/"AT5"/"ATC3".
-// Pega as letras iniciais (sigla) + o primeiro número (sem zero à esquerda).
 // Retorna null se não houver o padrão (ex. nome de canal "Auto Tech").
 function _normProjectKey(name) {
+    var p = _partesProjeto(name);
+    if (p) return p.sigla + p.numero;
+    // Reserva pros nomes "sujos", que não terminam no número — ex. uma pasta do
+    // Drive chamada "MT - 116 - Melhores TVs".
     var m = String(name || "").match(/([A-Za-z]+)\s*[-_ ]*\s*0*(\d+)/);
     if (!m) return null;
     return m[1].toUpperCase() + parseInt(m[2], 10);
 }
 
-// Só a SIGLA (letras iniciais) do nome do projeto, ex. "GT 14" → "GT".
+// Só a SIGLA do nome do projeto: "GT 14" → "GT", "5M 16" → "5M".
 function _projectSigla(name) {
+    var p = _partesProjeto(name);
+    if (p) return p.sigla;
     var m = String(name || "").match(/([A-Za-z]+)/);
     return m ? m[1].toUpperCase() : "";
 }
@@ -4113,10 +4138,10 @@ function _attemptRenameSequence(path, tries) {
         if (path !== _lastSeenProjectPath) return;
         var prj = ""; try { prj = (JSON.parse(raw) || {}).prj || ""; } catch (e) {}
         if (!prj) { if (tries < 12) setTimeout(function () { _attemptRenameSequence(path, tries + 1); }, 3000); return; } // cold-start
-        var m = prj.match(/([A-Za-z]+)\s*[-_ ]*(\d+)/);
+        var m = _partesProjeto(prj);
         if (!m) { _seqRenameState[path] = "done"; return; } // projeto não-convenção → não mexe
         _seqRenameState[path] = "done";
-        var target = m[1].toUpperCase() + " " + m[2]; // ex. "MT 100" (preserva o número do prproj)
+        var target = m.sigla + " " + m.numeroTexto;   // ex. "MT 100" (preserva o número do prproj)
         var esc = target.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         cs.evalScript('renameActiveSequenceToProject("' + esc + '")', function (r) {
             try { var d = JSON.parse(r); if (d && d.renamed) log("Sequência renomeada: '" + d.from + "' → '" + d.to + "'.", "ok"); } catch (e) {}
