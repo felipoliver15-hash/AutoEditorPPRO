@@ -875,6 +875,18 @@ function initRecursos() {
         try { audioAutoEl.checked = (localStorage.getItem(AUDIO_AUTO_STORAGE) === "1"); } catch (e) {}
         audioAutoEl.addEventListener("change", function () { try { localStorage.setItem(AUDIO_AUTO_STORAGE, audioAutoEl.checked ? "1" : "0"); } catch (e) {} });
     }
+    var audioNivelEl = document.getElementById("audio-nivel");
+    if (audioNivelEl) {
+        audioNivelEl.value = _nivelModo();
+        audioNivelEl.addEventListener("change", function () {
+            try { localStorage.setItem(NIVEL_STORAGE, audioNivelEl.value); } catch (e) {}
+            recLog("Nivelamento de áudio: " + ({
+                trecho: "trecho a trecho (alvo " + NIVEL_ALVO_LUFS + " LUFS)",
+                geral:  "só o volume geral (alvo " + NIVEL_ALVO_LUFS + " LUFS)",
+                off:    "desligado"
+            }[audioNivelEl.value] || audioNivelEl.value), "info");
+        });
+    }
 
     var tplBtn = document.getElementById("btn-create-templates");
     if (tplBtn) tplBtn.addEventListener("click", createTemplateSequencesAction);
@@ -2254,6 +2266,78 @@ var SILENCE_THRESHOLD_DB = -45;
 var SILENCE_MIN_DURATION = 0.30;
 var SILENCE_PADDING      = 0.05;
 var SILENCE_WINDOW       = 0.02;   // 20ms
+
+// ── Nivelamento de volume da narração ────────────────────────────────────────
+// O áudio sai do CapCut com o volume variando de trecho pra trecho, e às vezes
+// baixo demais no geral. Como o corte de silêncio JÁ re-renderiza o WAV com
+// ffmpeg, nivelar é só acrescentar filtro no mesmo pipeline — sem passada extra.
+//
+// Medido com uma narração sintética de 6 trechos variando 24 dB entre si:
+//   original ............. variação 24,0 dB · -38,9 LUFS
+//   só loudnorm .......... variação 18,0 dB · -18,5 LUFS  (conserta o geral, não o trecho)
+//   só dynaudnorm ........ variação 12,4 dB · -16,9 LUFS
+//   ganho por trecho ..... variação  0,0 dB  (mas sem alvo de loudness)
+//   os dois juntos ....... variação  0,8 dB · -15,1 LUFS · pico -1,1 dBFS  ← o modo "trecho"
+var NIVEL_STORAGE   = "autoeditor_nivel_audio";  // "trecho" | "geral" | "off"
+var NIVEL_ALVO_LUFS = -16;   // alvo de loudness integrada (padrão do YouTube)
+var NIVEL_ALVO_RMS  = -20;   // alvo de nível médio por trecho, antes do loudnorm
+var NIVEL_TETO_DB   = 20;    // ganho máximo por trecho — acima disso sobe o chiado junto
+
+function _nivelModo() {
+    try {
+        var v = localStorage.getItem(NIVEL_STORAGE);
+        if (v === "off" || v === "geral" || v === "trecho") return v;
+    } catch (e) {}
+    return "trecho";
+}
+
+// Cadeia aplicada DEPOIS de juntar os trechos. "" = não mexe no volume.
+function _cadeiaNivel(modo) {
+    if (modo === "off") return "";
+    var fim = "loudnorm=I=" + NIVEL_ALVO_LUFS + ":TP=-1.5:LRA=11,alimiter=limit=0.89";
+    // dynaudnorm com janela curta (75ms x 5) pra acompanhar a fala; sem isso ele
+    // suaviza por cima de um trecho inteiro e quase não corrige.
+    return (modo === "trecho") ? ("dynaudnorm=f=150:g=9:p=0.9:m=10," + fim) : fim;
+}
+
+// Ganho (dB) de cada trecho de fala, a partir do RMS por janela que o detector
+// de silêncio já calculou. Sem trecho medível → 0 dB (não inventa ganho).
+function _ganhosPorTrecho(keeps, janelas, janelaSeg) {
+    if (!keeps || !janelas || !janelas.length || !(janelaSeg > 0)) return null;
+    return keeps.map(function (k) {
+        var i0 = Math.floor(k.start / janelaSeg);
+        var i1 = Math.ceil(k.end / janelaSeg);
+        var somaSq = 0, n = 0;
+        for (var i = Math.max(0, i0); i < i1 && i < janelas.length; i++) {
+            somaSq += janelas[i] * janelas[i]; n++;
+        }
+        if (!n) return 0;
+        var rms = Math.sqrt(somaSq / n);
+        if (!(rms > 0)) return 0;
+        var db = 20 * Math.log(rms) / Math.LN10;
+        var g  = NIVEL_ALVO_RMS - db;
+        if (g >  NIVEL_TETO_DB) g =  NIVEL_TETO_DB;
+        if (g < -NIVEL_TETO_DB) g = -NIVEL_TETO_DB;
+        return g;
+    });
+}
+
+// Linha de log dizendo o que o nivelamento vai fazer.
+function _descreveNivel(modo, ganhos) {
+    if (modo === "geral") return "nivelando o volume geral (alvo " + NIVEL_ALVO_LUFS + " LUFS).";
+    if (!ganhos || !ganhos.length) return "nivelando o volume geral (não consegui medir os trechos).";
+    var min = ganhos[0], max = ganhos[0], soma = 0, noTeto = 0;
+    ganhos.forEach(function (g) {
+        if (g < min) min = g;
+        if (g > max) max = g;
+        soma += g;
+        if (Math.abs(g) >= NIVEL_TETO_DB - 0.01) noTeto++;
+    });
+    return "nivelando " + ganhos.length + " trecho(s): ganho de " + min.toFixed(1) + " a " +
+           max.toFixed(1) + " dB (média " + (soma / ganhos.length).toFixed(1) + ")" +
+           (noTeto ? ", " + noTeto + " no teto de " + NIVEL_TETO_DB + " dB" : "") +
+           " — alvo " + NIVEL_ALVO_LUFS + " LUFS.";
+}
 var AUDIO_EXTS = { mp3:1, wav:1, m4a:1, aac:1, flac:1, ogg:1, opus:1, wma:1, aiff:1, aif:1 };
 var AUDIO_AUTO_STORAGE = "autoeditor_audio_auto";  // "1" = corta ao abrir o projeto
 
@@ -2326,12 +2410,13 @@ function _detectSilenceRMS(audioPath, cb) {
                         { windowsHide:true, stdio:["ignore","pipe","ignore"] }); }
     catch (e) { cb(e); return; }
 
-    var silences = [], isSilent = false, silenceStart = 0;
+    var silences = [], isSilent = false, silenceStart = 0, niveis = [];
     var completedWindows = 0, samplesInWindow = 0, sumSq = 0, totalSamples = 0;
     var leftover = Buffer.alloc(0);
     function finalizeWindow(count) {
         var windowStart = completedWindows * windowSize;
         var rms = Math.sqrt(sumSq / count);
+        niveis.push(rms);
         var currentTime = windowStart / sr;
         if (rms < linTh) {
             if (!isSilent) { isSilent = true; silenceStart = currentTime; }
@@ -2365,7 +2450,11 @@ function _detectSilenceRMS(audioPath, cb) {
             var dur = duration - silenceStart;
             if (dur >= SILENCE_MIN_DURATION) silences.push({ start: silenceStart + SILENCE_PADDING, end: duration });
         }
-        cb(null, { duration: duration, silences: silences, sampleRate: sr });
+        // janelas: RMS linear de cada janela de SILENCE_WINDOW s. Já era calculado
+        // aqui pra decidir o silêncio e jogado fora — é o que o nivelamento usa pra
+        // medir cada trecho sem precisar de uma passada extra de ffmpeg.
+        cb(null, { duration: duration, silences: silences, sampleRate: sr,
+                   janelas: niveis, janelaSeg: SILENCE_WINDOW });
     });
 }
 
@@ -2382,16 +2471,30 @@ function _buildKeepSegments(duration, silences) {
 
 // Gera o WAV cortado: ffmpeg atrim+concat dos keep-segments (filtergraph num
 // arquivo, via -/filter_complex — sem limite de linha de comando). cb(err, outPath).
-function _generateCutAudio(audioPath, keeps, outPath, cb) {
+function _generateCutAudio(audioPath, keeps, outPath, cb, ganhos) {
     var cp = tryNodeRequire('child_process'), fs = tryNodeRequire('fs'), pmod = tryNodeRequire('path');
     var extDir = getExtensionRootClient();
     var ff = pmod.join(extDir, "bin", "ffmpeg.exe");
     var lines = [], labels = [];
     keeps.forEach(function (k, i) {
-        lines.push("[0:a]atrim=start=" + k.start.toFixed(3) + ":end=" + k.end.toFixed(3) + ",asetpts=PTS-STARTPTS[k" + i + "];");
+        // Ganho por trecho: cada pedaço de fala entra no seu próprio nível, o que
+        // corrige a variação de volume ENTRE os trechos (o áudio sai do CapCut com
+        // uns trechos bem mais baixos que outros).
+        var g   = (ganhos && ganhos.length === keeps.length) ? ganhos[i] : 0;
+        var vol = (Math.abs(g) > 0.1) ? (",volume=" + g.toFixed(2) + "dB") : "";
+        lines.push("[0:a]atrim=start=" + k.start.toFixed(3) + ":end=" + k.end.toFixed(3) + ",asetpts=PTS-STARTPTS" + vol + "[k" + i + "];");
         labels.push("[k" + i + "]");
     });
-    lines.push(labels.join("") + "concat=n=" + keeps.length + ":v=0:a=1[out]");
+    // Cadeia final depois de juntar tudo: acerta a loudness do vídeo inteiro e
+    // segura o pico. O dynaudnorm só entra no modo "trecho", pra alisar o que
+    // sobrou de variação DENTRO de cada pedaço.
+    var pos = _cadeiaNivel(_nivelModo());
+    if (pos) {
+        lines.push(labels.join("") + "concat=n=" + keeps.length + ":v=0:a=1[cc];");
+        lines.push("[cc]" + pos + "[out]");
+    } else {
+        lines.push(labels.join("") + "concat=n=" + keeps.length + ":v=0:a=1[out]");
+    }
     var fgPath = pmod.join(pmod.dirname(outPath), "_ae_silencefg.txt");
     try { fs.writeFileSync(fgPath, lines.join("\n"), "utf8"); } catch (e) { cb(e); return; }
     var ch;
@@ -2461,12 +2564,26 @@ function cutSilenceAndInsert(cb, strict) {
                 });
             }
 
+            var _modoNivel = _nivelModo();
+            var _ganhos    = (_modoNivel === "trecho")
+                ? _ganhosPorTrecho(keeps, res.janelas, res.janelaSeg) : null;
+
             if (!res.silences.length) {
-                recLog("Áudio: nenhum silêncio detectado — inserindo o original.", "info");
-                insert(found.path, found.name);
-                return;
+                if (_modoNivel === "off") {
+                    recLog("Áudio: nenhum silêncio detectado — inserindo o original.", "info");
+                    insert(found.path, found.name);
+                    return;
+                }
+                // Sem silêncio pra cortar, mas ainda há volume pra nivelar: renderiza
+                // o arquivo inteiro como um único trecho.
+                recLog("Áudio: nenhum silêncio detectado — só nivelando o volume…");
+                keeps   = [{ start: 0, end: res.duration }];
+                _ganhos = (_modoNivel === "trecho")
+                    ? _ganhosPorTrecho(keeps, res.janelas, res.janelaSeg) : null;
+            } else {
+                recLog("Áudio: " + res.silences.length + " silêncio(s), removendo " + removed.toFixed(1) + "s (de " + res.duration.toFixed(1) + "s) → cortando…");
             }
-            recLog("Áudio: " + res.silences.length + " silêncio(s), removendo " + removed.toFixed(1) + "s (de " + res.duration.toFixed(1) + "s) → cortando…");
+            if (_modoNivel !== "off") recLog("Áudio: " + _descreveNivel(_modoNivel, _ganhos));
             _generateCutAudio(found.path, keeps, outPath, function (e3, out) {
                 if (e3) {
                     var hint = /permission denied/i.test(e3.message)
@@ -2474,7 +2591,7 @@ function cutSilenceAndInsert(cb, strict) {
                     recLog("✗ Áudio: corte falhou: " + e3.message + hint, "err"); cb("error"); return;
                 }
                 insert(out, found.base + "_cut.wav");
-            });
+            }, _ganhos);
         });
     });
 }

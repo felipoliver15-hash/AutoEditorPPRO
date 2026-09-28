@@ -249,6 +249,13 @@
       <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9ad;margin-top:6px;cursor:pointer">
         <input type="checkbox" id="audio-auto"> Cortar automaticamente ao abrir o projeto
       </label>
+      <label for="audio-nivel" style="display:block;font-size:11px;color:#9ad;margin-top:8px">🔊 Nivelar o volume da narração</label>
+      <select id="audio-nivel" style="width:100%;box-sizing:border-box;padding:5px 8px;background:#1e1e1e;color:#ddd;border:1px solid #444;border-radius:4px">
+        <option value="trecho">Trecho a trecho (recomendado)</option>
+        <option value="geral">Só o volume geral</option>
+        <option value="off">Não mexer no volume</option>
+      </select>
+      <div class="hint" style="font-size:11px;color:#888;margin-top:4px">O áudio do CapCut costuma sair com o volume variando entre os trechos. <b>Trecho a trecho</b> mede cada pedaço de fala e entra com o ganho de cada um (teto de 20 dB, pra não subir chiado junto), depois acerta a loudness em −16 LUFS e segura o pico. <b>Só o volume geral</b> não mexe na variação entre trechos — use quando a narração já está uniforme, só baixa.</div>
       <div class="hint" style="font-size:11px;color:#888;margin-top:4px">Procura o áudio na pasta do projeto e, se não houver, na pasta global <b>Music\AutoEditor</b>. Corta os silêncios (−45 dB / 0,30 s / margem 0,05 s) e insere o resultado na faixa A1. Se não houver áudio ainda, tenta de novo a cada 15 s.</div>
     </div>
 
