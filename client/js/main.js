@@ -219,12 +219,17 @@ function _postPrecoFillItems(bm, t0, t1, track, slotDur) {
             cur += dur; loopIdx++;
         }
     }
-    // Mesma ideia do auto-fill: estica a última imagem em vez de deixar sobrar
-    // um pedacinho de preto no fim da janela.
+    // Mesma ideia do auto-fill: estica o último item (imagem à vontade, vídeo até
+    // onde a janela de origem permitir) em vez de deixar sobrar preto no fim.
     if (out.length) {
         var u = out[out.length - 1];
-        if (u.type === "product_image" && (u.time_seconds + u.duration) < t1 - 0.001) {
-            u.duration = t1 - u.time_seconds;
+        var fimU = u.time_seconds + u.duration;
+        if (fimU < t1 - 0.001) {
+            var falta = t1 - fimU;
+            var folga = (u.type === "product_image")
+                ? falta
+                : Math.max(0, (u.win_len || 0) - (u.duration || 0));
+            if (folga > 0) u.duration += Math.min(falta, folga);
         }
     }
     return out;
@@ -6566,13 +6571,27 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             // Fecha o resto até o preço. O último slot de imagem é descartado quando
             // fica curto (o "< 0.2" acima), e sobrava um buraco de até 0,2 s — ~5 frames
             // de preto bem na entrada do card de PRECO. Imagem estica de graça, então
-            // em vez de um slot-relâmpago esticamos o último item. Vídeo não dá: o
-            // win_len é a janela de origem e não há mais material pra puxar.
+            // em vez de um slot-relâmpago esticamos o último item. Vídeo TAMBÉM estica:
+            // o duration foi recortado de uma janela maior (win_len), então quase sempre
+            // sobra fonte pra puxar — eu tinha concluído errado que não dava.
             if (addedItems.length) {
                 var _ult = addedItems[addedItems.length - 1];
                 var _fimUlt = (_ult.time_seconds || 0) + (_ult.duration || 0);
-                if (_ult.type === "product_image" && _fimUlt < fillEnd - 0.001) {
-                    _ult.duration = fillEnd - _ult.time_seconds;
+                if (_fimUlt < fillEnd - 0.001) {
+                    var _falta = fillEnd - _fimUlt;
+                    // Imagem estica de graça. VÍDEO também estica: o duration foi
+                    // RECORTADO de uma janela maior (win_len), então quase sempre sobra
+                    // fonte — eu tinha concluído errado que não dava.
+                    var _folga = (_ult.type === "product_image")
+                        ? _falta
+                        : Math.max(0, (_ult.win_len || 0) - (_ult.duration || 0));
+                    var _usa = Math.min(_falta, _folga);
+                    if (_usa > 0) _ult.duration += _usa;
+                    var _resto = _falta - _usa;
+                    if (_resto > 0.02) {
+                        log("p" + (pIdx+1) + ": sobraram " + _resto.toFixed(3) + "s antes do PRECO — o último " +
+                            _ult.type + " já usa a janela inteira (" + (_ult.win_len || 0).toFixed(2) + "s)", "warn");
+                    }
                 }
             }
 
