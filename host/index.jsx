@@ -5176,26 +5176,62 @@ function applyBlurredBackgroundEffect(seq, trackIndex, item, startSec, durationS
         // ── 3. Set Blurriness = 50 no clip original.
         if (blurEffectName) {
             try {
-                for (var ci = 0; ci < origClip.components.numItems; ci++) {
-                    var comp = origClip.components[ci];
-                    var cdn = comp.displayName || "";
-                    if (cdn === blurEffectName) {
-                        for (var pi = 0; pi < comp.properties.numItems; pi++) {
-                            var prop = comp.properties[pi];
-                            var pdn = prop.displayName || "";
-                            // "Blurriness" (EN), "Desfoque"/"Borrão" (PT), "Desenfoque"
-                            // (ES). Antes so casava "blur", entao num Premiere em
-                            // portugues a propriedade nao era achada e o valor 50
-                            // nunca chegava a ser aplicado.
-                            var pn = _normNomeFx(pdn);
-                            if (pn.indexOf("blur") >= 0 || pn.indexOf("desfoque") >= 0 ||
-                                pn.indexOf("borr") >= 0 || pn.indexOf("desenfoque") >= 0) {
-                                prop.setValue(50, true);
-                                info.log.push("blurriness=50 (" + pdn + ")");
-                                break;
-                            }
+                // O nome vem do catalogo do QE, em INGLES ("Gaussian Blur"), mas o
+                // componente ja aplicado aparece LOCALIZADO no DOM normal — num
+                // Premiere pt-BR, "Desfoque gaussiano". A comparacao era `cdn ===
+                // blurEffectName`, que falhava CALADA: o efeito entrava no clip mas o
+                // Blurriness nunca era setado e ficava em 0. Resultado: blur invisivel,
+                // com o log dizendo "blur fx adicionado" mesmo assim.
+                var alvoFx    = _normNomeFx(blurEffectName);
+                var nomesComp = [];
+                var comp      = null;
+                // 1a passada: nome normalizado igual. 2a: qualquer componente com cara
+                // de desfoque (o efeito que acabamos de adicionar).
+                for (var passo = 0; passo < 2 && !comp; passo++) {
+                    for (var ci = 0; ci < origClip.components.numItems; ci++) {
+                        var c   = origClip.components[ci];
+                        var cdn = c.displayName || "";
+                        if (passo === 0) nomesComp.push(cdn);
+                        var cn = _normNomeFx(cdn);
+                        var bate = (passo === 0)
+                            ? (cn === alvoFx)
+                            : (cn.indexOf("gauss") >= 0 || cn.indexOf("desfoque") >= 0 ||
+                               cn.indexOf("blur") >= 0 || cn.indexOf("desenfoque") >= 0);
+                        if (bate) { comp = c; break; }
+                    }
+                }
+                if (!comp) {
+                    info.log.push("componente de blur NAO achado no clip (procurei " + blurEffectName + ") — componentes: [" + nomesComp.join(", ") + "]");
+                } else {
+                    var achouProp = false;
+                    for (var pi = 0; pi < comp.properties.numItems; pi++) {
+                        var prop = comp.properties[pi];
+                        var pdn  = prop.displayName || "";
+                        // "Blurriness" (EN), "Desfoque"/"Borrao" (PT), "Desenfoque"
+                        // (ES). Antes so casava "blur", entao num Premiere em
+                        // portugues a propriedade nao era achada e o valor 50
+                        // nunca chegava a ser aplicado.
+                        var pn = _normNomeFx(pdn);
+                        if (pn.indexOf("blur") >= 0 || pn.indexOf("desfoque") >= 0 ||
+                            pn.indexOf("borr") >= 0 || pn.indexOf("desenfoque") >= 0) {
+                            prop.setValue(50, true);
+                            // Le de volta: setValue tambem falha calado em algumas
+                            // propriedades, e ai o log mentiria de novo.
+                            var lido = null;
+                            try { lido = prop.getValue(); } catch (eGv) {}
+                            info.log.push("blurriness=50 em " + comp.displayName + " / " + pdn + (lido !== null ? (" (lido de volta: " + lido + ")") : ""));
+                            achouProp = true;
+                            break;
                         }
-                        break;
+                    }
+                    if (!achouProp) {
+                        var nomesProp = [];
+                        try {
+                            for (var pj = 0; pj < comp.properties.numItems; pj++) {
+                                nomesProp.push(comp.properties[pj].displayName || "?");
+                            }
+                        } catch (eLp) {}
+                        info.log.push("propriedade de blurriness NAO achada em " + comp.displayName + " — propriedades: [" + nomesProp.join(", ") + "]");
                     }
                 }
             } catch (eBlur) { info.log.push("setBlur err: " + eBlur.message); }
