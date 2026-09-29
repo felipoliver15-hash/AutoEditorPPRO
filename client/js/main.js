@@ -145,6 +145,11 @@ function formatPriceByLang(val, lang) {
 // O host aplica o mesmo valor — se mudar aqui, mude lá também.
 var PRECO_MAX_CAUDA = 20;
 
+// Folga ao fechar um preenchimento: ~1 frame. Era 0,2 s, o que fazia o último
+// pedaço ser descartado e deixava um buraco de até 5 frames — bem na entrada do
+// card de PRECO, onde aparece como um flash preto.
+var FILL_EPS = 0.04;
+
 // Último instante com narração (fim da última palavra da transcrição).
 function _fimDaNarracao() {
     if (!transcriptWords.length) return null;
@@ -200,7 +205,7 @@ function _postPrecoFillItems(bm, t0, t1, track, slotDur) {
         var cur     = t0;
         var loopIdx = 0;
         var safety  = (vwins.length || 1) * 50;
-        while (cur < t1 - 0.2 && safety-- > 0 && vwins.length) {
+        while (cur < t1 - FILL_EPS && safety-- > 0 && vwins.length) {
             var pv  = vwins[loopIdx % vwins.length];
             var dur = pv.winLen || 0;
             if (!(dur > 0)) { loopIdx++; continue; }
@@ -212,6 +217,14 @@ function _postPrecoFillItems(bm, t0, t1, track, slotDur) {
                 win_start: pv.winStart, win_len: dur
             });
             cur += dur; loopIdx++;
+        }
+    }
+    // Mesma ideia do auto-fill: estica a última imagem em vez de deixar sobrar
+    // um pedacinho de preto no fim da janela.
+    if (out.length) {
+        var u = out[out.length - 1];
+        if (u.type === "product_image" && (u.time_seconds + u.duration) < t1 - 0.001) {
+            u.duration = t1 - u.time_seconds;
         }
     }
     return out;
@@ -4996,15 +5009,25 @@ function maybeGenerateMappingViaGemini(transcriptContent, prjDir, seqName, done)
 // card), mas quem monta a lista as vezes despeja a especificacao inteira:
 // "PAF16C Air Fryer 16 Litros" — o texto estoura o layout do card.
 //
-// Regra, deliberadamente conservadora: SO encurta quando o PRIMEIRO pedaco e um
-// codigo de modelo (mistura letra e numero, 3+ caracteres) E ainda sobra texto
-// depois dele. Assim:
-//   "PAF16C Air Fryer 16 Litros"        -> "PAF16C"
-//   "AFON-12L-BG Air Fryer Oven 12 L"   -> "AFON-12L-BG"
-//   "PAF16C"                            -> "PAF16C"  (ja certo, nao mexe)
-//   "Air Fryer Oven Digital 12 Litros"  -> intacto   (nao ha codigo)
-// Nao tenta adivinhar modelo no meio da frase: preferimos deixar o nome inteiro
-// a arriscar cortar no lugar errado.
+// Regra, em duas etapas e deliberadamente conservadora:
+//
+//  1) se o PRIMEIRO pedaco ja e um codigo (mistura letra e numero, 3+ chars),
+//     corta dali — era a unica regra que existia:
+//       "PAF16C Air Fryer 16 Litros"        -> "PAF16C"
+//       "AFON-12L-BG Air Fryer Oven 12 L"   -> "AFON-12L-BG"
+//       "Z60 4G Smartphone"                 -> "Z60 4G"
+//
+//  2) senao, procura um codigo FORTE em qualquer posicao. Forte = tem numero E
+//     comeca com 2+ letras. Essas 2 letras sao o que separa MODELO de UNIDADE:
+//     "12L", "2000W", "15L", "4K" comecam com digito e nao entram.
+//       "Fogao Eletrico de Mesa FMP-02"     -> "FMP-02"     (modelo no fim)
+//       "Philco PAF15C Air Fryer Oven 15L"  -> "PAF15C"     (marca na frente)
+//       "Cafeteira Expresso CE-3000 Inox"   -> "CE-3000"
+//       "Air Fryer Oven Digital 12L"        -> intacto      (nao ha modelo)
+//       "Elgin Cook for 2 2000W"            -> intacto      (2000W e potencia)
+//
+// Quando nao reconhece nada, devolve o nome inteiro: preferimos um card com texto
+// demais a um card com o modelo errado.
 function _nomeProdutoNaTela(nome) {
     var s = String(nome == null ? "" : nome).replace(/^\s+|\s+$/g, "");
     if (!s) return "";
@@ -5014,18 +5037,28 @@ function _nomeProdutoNaTela(nome) {
     function caraDeModelo(p) {                     // tem letra E numero
         return /[A-Za-z]/.test(p) && /[0-9]/.test(p);
     }
+    // Codigo "forte": alem de letra+numero, comeca com 2+ letras. E o que impede
+    // o "12L"/"2000W"/"15L" de virar modelo: unidade comeca com DIGITO.
 
-    var primeiro = partes[0];
-    if (primeiro.length < 3) return s;
-    if (!caraDeModelo(primeiro)) return s;
+    var ini = -1;
+    if (partes[0].length >= 3 && caraDeModelo(partes[0])) {
+        ini = 0;                                   // etapa 1: modelo ja vem na frente
+    } else {
+        for (var i = 1; i < partes.length; i++) {  // etapa 2: procura no resto
+            if (partes[i].length >= 3 && caraDeModelo(partes[i]) && /^[A-Za-z]{2}/.test(partes[i])) {
+                ini = i; break;
+            }
+        }
+    }
+    if (ini < 0) return s;                         // nao reconheceu: nao arrisca cortar
 
     // Continua enquanto os pedacos seguintes TAMBEM tiverem cara de modelo
     // ("Z60 4G", "G10 3D", "A800S E1") e para na primeira palavra comum
     // ("Air", "Fryer"). Sem isso o 4G/3D — que fazem parte do modelo — eram
     // cortados junto com as specs.
-    var fim = 1;
+    var fim = ini + 1;
     while (fim < partes.length && caraDeModelo(partes[fim])) fim++;
-    return partes.slice(0, fim).join(" ");
+    return partes.slice(ini, fim).join(" ");
 }
 
 // Lê um arquivo como texto. Se detectar caracteres de substituição (encoding errado),
@@ -6470,7 +6503,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             if (vwins.length) {
                 var vcursor = fillStart, nVid = 0;
                 for (var vi = 0; vi < vwins.length; vi++) {
-                    if (vcursor >= fillEnd - 0.2) break;
+                    if (vcursor >= fillEnd - FILL_EPS) break;
                     var vwf = vwins[vi];
                     var vdurFull = vwf.winLen || 0;
                     if (!(vdurFull > 0)) continue;
@@ -6487,10 +6520,10 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                 // SE NÃO HOUVER IMAGENS no bin e ainda sobrar gap, faz LOOP das janelas
                 // (cicla na lista repetindo o(s) mesmo(s) trecho(s) — análogo ao loop
                 // de imagens em slots cíclicos).
-                if (bm.images.length === 0 && vcursor < fillEnd - 0.2) {
+                if (bm.images.length === 0 && vcursor < fillEnd - FILL_EPS) {
                     var loopIdx = vwins.length;
                     var safety  = vwins.length * 50;
-                    while (vcursor < fillEnd - 0.2 && safety-- > 0) {
+                    while (vcursor < fillEnd - FILL_EPS && safety-- > 0) {
                         var lv = vwins[loopIdx % vwins.length];
                         var lvdur = lv.winLen || 0;
                         if (!(lvdur > 0)) { loopIdx++; continue; }
@@ -6516,7 +6549,7 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
             // ── IMAGENS DO BIN: em loop, preenchendo o resto até o preço.
             var nImg = bm.images.length;
             var imgFillDur = fillEnd - imgStart;
-            var numSlots = (imgFillDur > 0.2 && nImg >= 1) ? Math.ceil(imgFillDur / slotDur) : 0;
+            var numSlots = (imgFillDur > FILL_EPS && nImg >= 1) ? Math.ceil(imgFillDur / slotDur) : 0;
             for (var i = 0; i < numSlots; i++) {
                 var t0 = imgStart + i * slotDur;
                 var t1 = Math.min(t0 + slotDur, fillEnd);
@@ -6530,6 +6563,19 @@ function applyAutoFillThenMount(mountProducts, mountData, isMulti, btn) {
                     _zoomPreset: (i % 2 === 0) ? "ZOOMIN" : "ZOOMOUT"
                 });
             }
+            // Fecha o resto até o preço. O último slot de imagem é descartado quando
+            // fica curto (o "< 0.2" acima), e sobrava um buraco de até 0,2 s — ~5 frames
+            // de preto bem na entrada do card de PRECO. Imagem estica de graça, então
+            // em vez de um slot-relâmpago esticamos o último item. Vídeo não dá: o
+            // win_len é a janela de origem e não há mais material pra puxar.
+            if (addedItems.length) {
+                var _ult = addedItems[addedItems.length - 1];
+                var _fimUlt = (_ult.time_seconds || 0) + (_ult.duration || 0);
+                if (_ult.type === "product_image" && _fimUlt < fillEnd - 0.001) {
+                    _ult.duration = fillEnd - _ult.time_seconds;
+                }
+            }
+
             // Warning final só se NEM vídeo (loop) NEM imagem conseguiu cobrir.
             if (imgFillDur > 0.2 && nImg < 1 && videoLooped === 0) {
                 log("p" + (pIdx+1) + ": vídeos terminaram em " + imgStart.toFixed(1) + "s mas o bin não tem nada utilizável pra preencher até " + fillEnd.toFixed(1) + "s.", "warn");

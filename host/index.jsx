@@ -1503,6 +1503,9 @@ function expandSequenceIntoMain(srcSeq, mainSeq, baseTrackIndex, baseTimeSec, an
                         try { aStart = parseFloat(aClip.start.ticks); } catch(e) {}
                         try { aIn = parseFloat(aClip.inPoint.ticks); } catch(e) {}
                         try { aOut = parseFloat(aClip.outPoint.ticks); } catch(e) {}
+                        // Comprimento do clip DENTRO da template (não do arquivo).
+                        var aDur = 0;
+                        try { aDur = parseFloat(aClip.end.ticks) - aStart; } catch (e) {}
 
                         var aDstTicks = (baseTimeSec * TPS) + aStart - anchorTicks;
                         if (aDstTicks < 0) aDstTicks = 0;
@@ -1521,6 +1524,22 @@ function expandSequenceIntoMain(srcSeq, mainSeq, baseTrackIndex, baseTimeSec, an
                             if (newA && (aIn > 0 || aOut > 0)) {
                                 try { var aNi = new Time(); aNi.ticks = String(aIn); newA.inPoint = aNi; } catch(e) {}
                                 try { var aNo = new Time(); aNo.ticks = String(aOut); newA.outPoint = aNo; } catch(e) {}
+                            }
+                            // E SEMPRE corta no comprimento que o clip tinha na template.
+                            // O overwriteClip insere o projectItem INTEIRO; o ajuste de
+                            // in/out acima só roda quando in/out são legíveis (> 0). Quando
+                            // não são — subclip, ou a leitura falha — o SFX ficava com a
+                            // duração integral do arquivo de origem, esticado e passando do
+                            // fim do vídeo (a transição do final é a mais visível).
+                            if (newA && aDur > 0) {
+                                try {
+                                    var aEndT = new Time();
+                                    aEndT.ticks = String(aDstTicks + aDur);
+                                    newA.end = aEndT;
+                                } catch (eTrimA) {
+                                    log.push("SFX clip " + sac + ": não consegui cortar em " +
+                                             (aDur / TPS).toFixed(2) + "s — " + eTrimA.message);
+                                }
                             }
                         } catch(eAo) {
                             log.push("SFX clip " + sac + " overwriteClip ERR: " + eAo.message);
